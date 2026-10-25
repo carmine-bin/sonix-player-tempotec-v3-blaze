@@ -2483,6 +2483,16 @@ static void *tls_warm_thread(void *arg) {
 	return NULL;
 }
 
+static void tls_warm_start_cb(lv_timer_t *t) {
+	(void)t;
+	pthread_t tls_thread;
+	if (pthread_create(&tls_thread, NULL, tls_warm_thread, NULL) == 0) {
+		pthread_detach(tls_thread);
+	} else {
+		fprintf(stderr, "tls: no thread for the warm-up; loaded on first use\n");
+	}
+}
+
 int main(int argc, char **argv) {
 	// Before anything at all -- before the signal guards, before the allocator
 	// is tuned, before a display is opened. thttpd runs this same binary as the
@@ -2863,14 +2873,9 @@ int main(int argc, char **argv) {
 	// OpenSSL is loaded on a worker below the interface: the libraries and the
 	// certificate bundle take a quarter of a second on this core, and nothing
 	// needs them until a stream is opened, which waits on the loader's lock.
-	{
-		pthread_t tls_thread;
-		if (pthread_create(&tls_thread, NULL, tls_warm_thread, NULL) == 0) {
-			pthread_detach(tls_thread);
-		} else {
-			fprintf(stderr, "tls: no thread for the warm-up; loaded on first use\n");
-		}
-	}
+	// Started 2 s into the main loop: on one core a worker at nice 10 still
+	// takes its quarter second out of the boot window.
+	lv_timer_set_repeat_count(lv_timer_create(tls_warm_start_cb, 2000, NULL), 1);
 
 	// The radios, before the interface: both read their switch out of the
 	// config here, and the Wireless pages are built from those switches, so a

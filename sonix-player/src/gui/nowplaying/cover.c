@@ -436,19 +436,65 @@ static uint8_t *resample_area(const raw_image_t *src, const crop_t *crop, int ds
 // upside down. It averages over the source footprint when shrinking, which
 // keeps thumbnails from turning into noise, and interpolates when growing, so
 // small covers stretched edge to edge do not come out blocky.
+// Bilinear growth, sampling the source at the centre of each output pixel, in
+// 8-bit fixed point: the float version spent two divisions and fifteen
+// conversions on every pixel, and the backdrops it stretches are a whole screen.
+static uint8_t *magnify_bilinear(const raw_image_t *src, const crop_t *crop, int dst_w, int dst_h, bool flip_v) {
+	uint8_t *dst = malloc((size_t)dst_w * dst_h * 3);
+	int32_t *cols = malloc((size_t)dst_w * 3 * sizeof(*cols)); // per column: x0 offset, x1 offset, weight
+	if (!dst || !cols) {
+		free(dst);
+		free(cols);
+		return NULL;
+	}
+	for (int x = 0; x < dst_w; x++) {
+		int32_t fx = (int32_t)(((int64_t)(2 * x + 1) * crop->w * 128) / dst_w) - 128;
+		fx = fx < 0 ? 0 : fx;
+		int x0 = fx >> 8;
+		int x1 = x0 + 1 < crop->w ? x0 + 1 : x0;
+		cols[3 * x] = (crop->x + x0) * 3;
+		cols[3 * x + 1] = (crop->x + x1) * 3;
+		cols[3 * x + 2] = fx & 255;
+	}
+	for (int y = 0; y < dst_h; y++) {
+		int32_t fy = (int32_t)(((int64_t)(2 * y + 1) * crop->h * 128) / dst_h) - 128;
+		fy = fy < 0 ? 0 : fy;
+		int y0 = fy >> 8;
+		int y1 = y0 + 1 < crop->h ? y0 + 1 : y0;
+		uint32_t ty = (uint32_t)fy & 255;
+		const uint8_t *row0 = src->pixels + (size_t)(crop->y + y0) * src->w * 3;
+		const uint8_t *row1 = src->pixels + (size_t)(crop->y + y1) * src->w * 3;
+		uint8_t *out = dst + (size_t)(flip_v ? dst_h - 1 - y : y) * dst_w * 3;
+		for (int x = 0; x < dst_w; x++) {
+			const uint8_t *a = row0 + cols[3 * x], *b = row0 + cols[3 * x + 1];
+			const uint8_t *c = row1 + cols[3 * x], *d = row1 + cols[3 * x + 1];
+			uint32_t tx = (uint32_t)cols[3 * x + 2];
+			for (int k = 0; k < 3; k++) {
+				uint32_t top = a[k] * (256 - tx) + b[k] * tx;
+				uint32_t bottom = c[k] * (256 - tx) + d[k] * tx;
+				out[k] = (uint8_t)((top * (256 - ty) + bottom * ty) >> 16);
+			}
+			out += 3;
+		}
+	}
+	free(cols);
+	return dst;
+}
+
 static uint8_t *resample_rgb(const raw_image_t *src, const crop_t *crop, int dst_w, int dst_h, bool flip_v) {
 	if (dst_w < 1 || dst_h < 1)
 		return NULL;
 
 	bool magnify = (dst_w >= crop->w);
 
-	// A shrink goes by area (above). The loop below stays for the case where
-	// that cannot get its tables, and for growing.
-	if (!magnify) {
-		uint8_t *by_area = resample_area(src, crop, dst_w, dst_h, flip_v);
-		if (by_area)
-			return by_area;
+	// A shrink goes by area (above), growth bilinearly; the loop below stays
+	// for the case where the area tables cannot be had.
+	if (magnify) {
+		return magnify_bilinear(src, crop, dst_w, dst_h, flip_v);
 	}
+	uint8_t *by_area = resample_area(src, crop, dst_w, dst_h, flip_v);
+	if (by_area)
+		return by_area;
 
 	uint8_t *dst = malloc((size_t)dst_w * dst_h * 3);
 	if (!dst)
@@ -461,57 +507,30 @@ static uint8_t *resample_rgb(const raw_image_t *src, const crop_t *crop, int dst
 		for (int x = 0; x < dst_w; x++) {
 			uint32_t r, g, b;
 
-			if (magnify) {
-				// Bilinear: sample the source at the centre of this output pixel.
-				float fx = ((float)x + 0.5f) * crop->w / dst_w - 0.5f;
-				float fy = ((float)y + 0.5f) * crop->h / dst_h - 0.5f;
-				if (fx < 0)
-					fx = 0;
-				if (fy < 0)
-					fy = 0;
+			// Box average over every source pixel this output pixel covers.
+			int sy0 = crop->y + (int)((int64_t)y * crop->h / dst_h);
+			int sy1 = crop->y + (int)((int64_t)(y + 1) * crop->h / dst_h);
+			int sx0 = crop->x + (int)((int64_t)x * crop->w / dst_w);
+			int sx1 = crop->x + (int)((int64_t)(x + 1) * crop->w / dst_w);
+			if (sy1 <= sy0)
+				sy1 = sy0 + 1;
+			if (sx1 <= sx0)
+				sx1 = sx0 + 1;
 
-				int x0 = (int)fx, y0 = (int)fy;
-				int x1 = x0 + 1 < crop->w ? x0 + 1 : x0;
-				int y1 = y0 + 1 < crop->h ? y0 + 1 : y0;
-				float tx = fx - x0, ty = fy - y0;
-
-				const uint8_t *p00 = src->pixels + (((size_t)(crop->y + y0) * src->w) + crop->x + x0) * 3;
-				const uint8_t *p10 = src->pixels + (((size_t)(crop->y + y0) * src->w) + crop->x + x1) * 3;
-				const uint8_t *p01 = src->pixels + (((size_t)(crop->y + y1) * src->w) + crop->x + x0) * 3;
-				const uint8_t *p11 = src->pixels + (((size_t)(crop->y + y1) * src->w) + crop->x + x1) * 3;
-
-				float w00 = (1 - tx) * (1 - ty), w10 = tx * (1 - ty);
-				float w01 = (1 - tx) * ty, w11 = tx * ty;
-
-				r = (uint32_t)(p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11);
-				g = (uint32_t)(p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11);
-				b = (uint32_t)(p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11);
-			} else {
-				// Box average over every source pixel this output pixel covers.
-				int sy0 = crop->y + (int)((int64_t)y * crop->h / dst_h);
-				int sy1 = crop->y + (int)((int64_t)(y + 1) * crop->h / dst_h);
-				int sx0 = crop->x + (int)((int64_t)x * crop->w / dst_w);
-				int sx1 = crop->x + (int)((int64_t)(x + 1) * crop->w / dst_w);
-				if (sy1 <= sy0)
-					sy1 = sy0 + 1;
-				if (sx1 <= sx0)
-					sx1 = sx0 + 1;
-
-				uint32_t sr = 0, sg = 0, sb = 0, n = 0;
-				for (int sy = sy0; sy < sy1; sy++) {
-					const uint8_t *row = src->pixels + (size_t)sy * src->w * 3;
-					for (int sx = sx0; sx < sx1; sx++) {
-						const uint8_t *px = row + (size_t)sx * 3;
-						sr += px[0];
-						sg += px[1];
-						sb += px[2];
-						n++;
-					}
+			uint32_t sr = 0, sg = 0, sb = 0, n = 0;
+			for (int sy = sy0; sy < sy1; sy++) {
+				const uint8_t *row = src->pixels + (size_t)sy * src->w * 3;
+				for (int sx = sx0; sx < sx1; sx++) {
+					const uint8_t *px = row + (size_t)sx * 3;
+					sr += px[0];
+					sg += px[1];
+					sb += px[2];
+					n++;
 				}
-				r = sr / n;
-				g = sg / n;
-				b = sb / n;
 			}
+			r = sr / n;
+			g = sg / n;
+			b = sb / n;
 
 			uint8_t *out_px = dst_row + (size_t)x * 3;
 			out_px[0] = (uint8_t)r;

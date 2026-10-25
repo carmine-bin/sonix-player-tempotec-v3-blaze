@@ -781,6 +781,12 @@ bool wifitransfer_running(void) {
 	static bool have;
 	static uint32_t cached_generation;
 
+	// Switched off, there is no server to find: the power tick asks on every
+	// pass (idle_links_tick), and each answer was a walk of /proc.
+	if (!g_enabled) {
+		return false;
+	}
+
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	uint32_t now = (uint32_t)(ts.tv_sec * 1000u + ts.tv_nsec / 1000000u);

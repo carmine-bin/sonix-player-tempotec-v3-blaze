@@ -143,9 +143,9 @@ bool playlist_is_junk_name(const char *name);
 void playlist_set_album(const char *album);
 const char *playlist_album(void);
 
-// Called by the boot restore once the label has been put back, so that putting
-// it back is not itself written down again.
-void playlist_note_album_restored(void);
+// Called by the boot restore with the label the card holds, before it is put
+// back, so that putting it back is not itself written down again.
+void playlist_note_album_restored(const char *album);
 
 // Forces the custom flag. Only the boot-time restore uses this: the saved
 // queue comes back through playlist_load_paths() whatever its origin, and a

@@ -189,8 +189,8 @@ void playlist_set_album(const char *album) {
 
 // After a restore: the label came off the card, so putting it back is not a
 // change to write down again.
-void playlist_note_album_restored(void) {
-	snprintf(persisted_album, sizeof(persisted_album), "%s", queue_album);
+void playlist_note_album_restored(const char *album) {
+	snprintf(persisted_album, sizeof(persisted_album), "%s", album ? album : "");
 }
 
 const char *playlist_album(void) { return queue_album; }

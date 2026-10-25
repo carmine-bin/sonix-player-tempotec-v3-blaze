@@ -1079,13 +1079,17 @@ void device_state_restore_file(const char *filepath, double position) {
 // by hand.
 static void restore_queue_album(void) {
 	char album[256];
-	if (library_queue_load_album(album, (int)sizeof(album))) {
+	if (!library_queue_load_album(album, (int)sizeof(album))) {
+		album[0] = '\0';
+	}
+	// Noted before it is set: the label goes back as the card already has it.
+	playlist_note_album_restored(album);
+	if (album[0]) {
 		playlist_set_album(album);
 		char shown[sizeof(album)];
 		library_album_title(album, shown, sizeof(shown));
 		fprintf(stderr, "queue: the restored queue is the record \"%s\"\n", shown);
 	}
-	playlist_note_album_restored();
 }
 
 // The same restore, but with the queue that was saved next to the track, so

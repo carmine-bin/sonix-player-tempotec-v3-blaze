@@ -224,6 +224,9 @@ static const char *const SCHEMA_INDEXES[] = {
 	// An album's first track in disc and track order (ALBUM_GROUP_FIRST): read
 	// off this index instead of sorting every track of the album per row.
 	"CREATE INDEX IF NOT EXISTS media_album_first_idx ON MEDIA_TABLE(album, album_key, COALESCE(disc,1), dis_id)",
+	// The tracks album_keys_fill() still has to fill: none, once it has run. Its
+	// check at every open is then one empty b-tree, not a walk of every track.
+	"CREATE INDEX IF NOT EXISTS media_album_key_null_idx ON MEDIA_TABLE(album_key) WHERE album_key IS NULL",
 	// The same for the artist and album artist lists by date.
 	"CREATE INDEX IF NOT EXISTS media_artist_ctime_idx ON MEDIA_TABLE(artist, ctime)",
 	"DROP INDEX IF EXISTS media_artist_idx",
@@ -1440,7 +1443,8 @@ bool library_open(const char *db_path) {
 	snprintf(db_file, sizeof(db_file), "%s", db_path);
 	file_identity_read(db_path, &db_identity);
 
-	printf("library: %s open, %d tracks indexed\n", db_path, library_track_count());
+	// No count here: COUNT(*) walks a whole index, on the way to the first frame.
+	printf("library: %s open\n", db_path);
 
 	sortkeys_start_backfill();
 	return true;

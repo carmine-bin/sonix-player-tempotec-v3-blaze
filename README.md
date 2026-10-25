@@ -54,8 +54,8 @@ upstream Sonix 1.2.0 with the first set of Blaze changes.
 
 **Hardware**
 
-- The interface is laid out at 480x720 and drawn 2/3 onto the 320x480 panel;
-  the touch panel is calibrated to match.
+- The interface is laid out and drawn natively at 320x480 (since
+  1.3.0.3), with the touch panel calibrated to match.
 - AK4493SEQ audio board: three gain levels like the stock player (LDB, MDB,
   HDB), TempoTec's default DAC filter, the analogue output muted before
   power-off and reboot, the amplifier left off until the first track.
@@ -145,6 +145,22 @@ sonix-packer/
 Streaming services (Tidal, Qobuz, Podcast Index, Last.fm) need keys of your
 own, sealed into `assets/BLAZE/usr/resource/sonix/components/streaming-keys.bin`;
 see "Streaming keys" in the upstream README.
+
+## Working on the code
+
+- `make host` in `sonix-player/` builds a desktop simulator
+  (`sonix_player_host`, SDL2) for trying the interface without the device.
+- `make test` runs the host self-checks in `tools/*_selftest.c`: the battery
+  usage counts, the DSD filter and the custom boot logo. Plain `gcc`, no
+  toolchain, a few seconds. GitHub runs it on every push to `blaze-port`.
+- `make target` ends with `make check-abi`, which refuses a binary that asks
+  for anything newer than the device's glibc 2.22.
+- Where things live: `src/gui/` is the interface (one folder per area,
+  `nowplaying/`, `settings/`, `shell/`...), `src/system/` the rest (playback,
+  library, devices, network); the tree is described in
+  [UPSTREAM-README.md](UPSTREAM-README.md).
+- Each Blaze change is one commit on `blaze-port` whose message says what it
+  does and why; `git log -- <file>` explains a line faster than any comment.
 
 ## License and credits
 

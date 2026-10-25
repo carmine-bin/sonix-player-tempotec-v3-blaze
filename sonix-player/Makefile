@@ -446,6 +446,25 @@ check-abi:
 	fi; \
 	echo "check-abi: no symbol beyond glibc $(DEVICE_GLIBC_MAJOR).$(DEVICE_GLIBC_MINOR)."
 
+# The host self-checks in tools/*_selftest.c, built straight from the sources
+# with plain gcc: no SDL, no bundled libraries, nothing from make host. Each
+# stops on the first failed assert, and make with it.
+TEST_DIR = build_test
+IMAGE_TEST_SRCS = src/system/image/art_shrink.c src/system/image/jpeg_scaled.c src/system/image/png_scaled.c \
+				  src/system/image/png_write.c src/system/image/stb_image_impl.c
+
+.PHONY: test
+test:
+	@mkdir -p $(TEST_DIR)
+	$(CC) -O2 -Wall -DHOST_BUILD -I. -I$(LVGL_DIR) tools/batterystats_selftest.c -lm -o $(TEST_DIR)/batterystats_selftest
+	$(TEST_DIR)/batterystats_selftest
+	$(CC) -O2 -Wall -I. tools/dsd_selftest.c src/system/decode/dsd.c -lpthread -lm -o $(TEST_DIR)/dsd_selftest
+	$(TEST_DIR)/dsd_selftest $(TEST_DIR)
+	$(CC) -O2 -Wall -I. -DBOOTLOGO_CUSTOM_FILE='"$(CURDIR)/$(TEST_DIR)/bootlogo.jpeg"' tools/bootlogo_selftest.c \
+		src/system/device/bootlogo.c $(IMAGE_TEST_SRCS) -lpthread -lm -ldl -o $(TEST_DIR)/bootlogo_selftest
+	$(TEST_DIR)/bootlogo_selftest $(TEST_DIR)
+	@echo "test: all self-checks passed."
+
 # The flags every target object was compiled with, the optimisation levels
 # included. Rewritten only when they differ, so a change of flags rebuilds
 # everything and nothing else does.
@@ -474,7 +493,7 @@ compile_commands.json:
 	@python3 generate_compile_commands.py
 
 clean:
-	rm -rf build_host build_target build_gen $(HOST_BIN) $(TARGET_BIN) $(TARGET_DEBUG_BIN) $(LAUNCH_BIN) compile_commands.json compile_flags.txt
+	rm -rf build_host build_target build_gen $(TEST_DIR) $(HOST_BIN) $(TARGET_BIN) $(TARGET_DEBUG_BIN) $(LAUNCH_BIN) compile_commands.json compile_flags.txt
 
 # The bundled libraries and their extracted sources. The downloaded tarballs stay.
 .PHONY: libs-clean

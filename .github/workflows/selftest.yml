@@ -1,0 +1,17 @@
+name: Self-checks
+
+# make test: the host self-checks in sonix-player/tools/*_selftest.c (battery
+# usage counts, DSD filter, custom boot logo). Plain gcc, no toolchain, about
+# half a minute with the LVGL clone.
+
+on:
+  push:
+    branches: [blaze-port]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -C sonix-player test

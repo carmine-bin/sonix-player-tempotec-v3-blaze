@@ -8,6 +8,7 @@ sonix-player/sonix_launch
 sonix-player/build_target
 sonix-player/build_host
 sonix-player/build_gen
+sonix-player/build_test
 
 # The streaming keys: in the clear, the key that seals them, and the sealed
 # file, which only a player built with that key can open.

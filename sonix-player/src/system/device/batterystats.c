@@ -181,7 +181,7 @@ static void settle(int drop) {
 						  (unsigned long long)(s_interval_ms[k] / 1000));
 		}
 	}
-	puts(line);
+	printf("%s\n", line); // not puts(): glibc 2.22 puts() skips the stamped stdout (see Makefile)
 	memset(s_interval_ms, 0, sizeof(s_interval_ms));
 	s_ref_fresh = false;
 }

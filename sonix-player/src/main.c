@@ -1907,6 +1907,41 @@ static void fb_pan_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *
 	lv_display_flush_ready(disp);
 }
 
+// The animation plays on a thread while the rest of the start-up runs: it is
+// ~5 s of sleeping between frames, and inline it held the first frame back by
+// that much. Nothing draws to the framebuffer until the main loop's first
+// flush, so it only has to be over by then (bootanim_wait).
+static pthread_t bootanim_thread;
+static bool bootanim_running;
+static struct {
+	uint16_t *fb;
+	int w, h;
+} bootanim_args;
+
+static void *bootanim_thread_func(void *arg) {
+	(void)arg;
+	bootanim_play(bootanim_args.fb, bootanim_args.w, bootanim_args.h);
+	return NULL;
+}
+
+static void bootanim_start(uint16_t *fb, int w, int h) {
+	bootanim_args.fb = fb;
+	bootanim_args.w = w;
+	bootanim_args.h = h;
+	bootanim_running = pthread_create(&bootanim_thread, NULL, bootanim_thread_func, NULL) == 0;
+	if (!bootanim_running) {
+		bootanim_play(fb, w, h);
+	}
+}
+
+static void bootanim_wait(void) {
+	if (bootanim_running) {
+		pthread_join(bootanim_thread, NULL);
+		bootanim_running = false;
+		printf("bootanim: done before the first frame\n");
+	}
+}
+
 static lv_display_t *try_panned_display(void) {
 	fb_fd = open("/dev/fb0", O_RDWR);
 	if (fb_fd < 0) {
@@ -1975,7 +2010,7 @@ static lv_display_t *try_panned_display(void) {
 	// TempoTec's mark and would sit on top of someone else's picture.
 	bool custom_logo = bootlogo_draw_custom((uint16_t *)fb_mem, (int)fb_var.xres, (int)fb_var.yres);
 	if (model && model->boot_animation && !custom_logo) {
-		bootanim_play((uint16_t *)fb_mem, (int)fb_var.xres, (int)fb_var.yres);
+		bootanim_start((uint16_t *)fb_mem, (int)fb_var.xres, (int)fb_var.yres);
 	}
 	if (model && model->panel_width * 2 == log_w * 3 && model->panel_height * 2 == log_h * 3) {
 		size_t size = (size_t)model->panel_width * (size_t)model->panel_height * 2;
@@ -3035,6 +3070,9 @@ int main(int argc, char **argv) {
 	lock_code_start();
 #endif
 
+#ifndef HOST_BUILD
+	bootanim_wait();
+#endif
 	printf("Entering main event loop...\n");
 	while (running) {
 		ui_heartbeat++;

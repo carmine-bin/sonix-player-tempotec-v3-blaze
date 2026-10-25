@@ -215,10 +215,6 @@ static void write_all(int fd, const char *data, size_t size);
 #define QUEUE_HEADER 3
 #define QUEUE_WRITE_MAX 8192
 #define QUEUE_SYNC_MS 1000
-// The first boot after an update sometimes freezes a couple of seconds in and
-// the device restarts on its own; with a sync a second the last lines before
-// it never reach the card. Every write is synced for this long after start.
-#define QUEUE_BOOT_SYNC_MS 40000
 #define QUEUE_DRAIN_MS 1500
 
 static pthread_mutex_t queue_lock;
@@ -340,7 +336,6 @@ static void *queue_writer(void *arg) {
 	static char out[QUEUE_WRITE_MAX];
 	bool unsynced = false;
 	long synced_at = queue_now_ms();
-	long boot_sync_until = synced_at + QUEUE_BOOT_SYNC_MS;
 
 	for (;;) {
 		pthread_mutex_lock(&queue_lock);
@@ -376,7 +371,7 @@ static void *queue_writer(void *arg) {
 			write_all(fd, out, size);
 			unsynced = true;
 		}
-		if (unsynced && (queue_now_ms() - synced_at >= QUEUE_SYNC_MS || queue_now_ms() < boot_sync_until)) {
+		if (unsynced && queue_now_ms() - synced_at >= QUEUE_SYNC_MS) {
 			sync_card();
 			synced_at = queue_now_ms();
 			unsynced = false;

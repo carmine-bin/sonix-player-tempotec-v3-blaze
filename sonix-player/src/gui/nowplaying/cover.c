@@ -1613,6 +1613,7 @@ static uint64_t player_source_id(const char *filepath, int *index);
 static bool player_cover_load(uint64_t id, int w, int h, cover_image_t *out);
 static bool player_cover_kept(uint64_t id, int w, int h);
 static void player_cover_store(uint64_t id, int w, int h, const cover_image_t *img);
+static void player_cover_store_soon(uint64_t id, int w, int h, const cover_image_t *img);
 static void cover_tone_attach(uint64_t id, cover_image_t *img);
 
 // The backdrop made from a cover already scaled and packed, for a cover that
@@ -1707,7 +1708,7 @@ bool cover_load_player_images(const char *filepath, int cover_w, int cover_h, co
 	// a cover that fell back to another one would be stored under a key that
 	// does not describe it.
 	if (ok && id && cover_index >= 0 && used == source_index) {
-		player_cover_store(id, cover_w, cover_h, &results[cover_index]);
+		player_cover_store_soon(id, cover_w, cover_h, &results[cover_index]);
 	}
 	// The colour goes with it, kept under the same id on the same condition.
 	if (ok && cover_index >= 0) {
@@ -1779,7 +1780,7 @@ bool cover_load_shared(const char *filepath, int player_w, int player_h, int siz
 		}
 		keyed = id && used == source_index;
 		if (keyed) {
-			player_cover_store(id, player_w, player_h, &big);
+			player_cover_store_soon(id, player_w, player_h, &big);
 		}
 	}
 
@@ -2879,7 +2880,7 @@ static bool player_cover_load(uint64_t id, int w, int h, cover_image_t *out) {
 		out->dsc.header.stride = (uint32_t)w * 2;
 		out->dsc.data_size = (uint32_t)blob_len;
 		out->dsc.data = blob;
-		player_cover_store(id, w, h, out);
+		player_cover_store_soon(id, w, h, out);
 	} else {
 		hit = blob_len > 2 && blob[0] == 0xFF && blob[1] == 0xD8 && image_from_jpeg(blob, blob_len, w, h, out);
 		free(blob);
@@ -2902,6 +2903,41 @@ static bool player_cover_kept(uint64_t id, int w, int h) {
 	}
 	pthread_mutex_unlock(&thumb_db_lock);
 	return kept;
+}
+
+// A cover kept for cover_store_deferred(): a copy, since the original goes to
+// the screen and may be freed before the store runs.
+static __thread bool store_deferred;
+static __thread struct {
+	uint64_t id;
+	int w, h;
+	cover_image_t img;
+} deferred_store;
+
+void cover_defer_player_store(bool on) { store_deferred = on; }
+
+void cover_store_deferred(void) {
+	if (deferred_store.img.pixels) {
+		player_cover_store(deferred_store.id, deferred_store.w, deferred_store.h, &deferred_store.img);
+		cover_free(&deferred_store.img);
+	}
+}
+
+static void player_cover_store_soon(uint64_t id, int w, int h, const cover_image_t *img) {
+	if (!store_deferred) {
+		player_cover_store(id, w, h, img);
+		return;
+	}
+	cover_free(&deferred_store.img);
+	if (!img || !img->pixels || !(deferred_store.img.pixels = malloc(img->dsc.data_size))) {
+		return;
+	}
+	memcpy(deferred_store.img.pixels, img->pixels, img->dsc.data_size);
+	deferred_store.img.dsc = img->dsc;
+	deferred_store.img.dsc.data = deferred_store.img.pixels;
+	deferred_store.id = id;
+	deferred_store.w = w;
+	deferred_store.h = h;
 }
 
 static void player_cover_store(uint64_t id, int w, int h, const cover_image_t *img) {

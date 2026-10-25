@@ -99,6 +99,14 @@ bool cover_picture_known(const char *filepath);
 bool cover_load_player_images(const char *filepath, int cover_w, int cover_h, cover_image_t *cover_out,
 							  int backdrop_w, int backdrop_h, cover_image_t *backdrop_out);
 
+// Storing the cover in the thumbnail database means encoding it as a JPEG, the
+// slowest step after the decode, and nobody waits for it. Between
+// cover_defer_player_store(true) and (false), this thread's loaders keep a copy
+// instead, and cover_store_deferred() writes it once the picture has been
+// handed on.
+void cover_defer_player_store(bool on);
+void cover_store_deferred(void);
+
 // Puts the player's pictures for `filepath` in the on-disk cache without
 // handing them to anybody: the next track's, decoded while this one plays, so
 // that skipping to it reads them back instead of decoding. Does nothing when

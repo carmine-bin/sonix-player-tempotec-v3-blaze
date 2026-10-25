@@ -228,8 +228,11 @@ static void *worker(void *arg) {
 		// The player's artwork is the picture the user is actually looking
 		// at; it goes before any list thumbnail.
 		if (player_job.pending && !player_job.running) {
+			cover_defer_player_store(true);
 			run_dual_job(&player_job, cover_load_player_images); // returns unlocked
+			cover_defer_player_store(false);
 			player_ready();
+			cover_store_deferred(); // the picture is on its way; now its row in the database
 			continue;
 		}
 
@@ -271,8 +274,10 @@ static void *worker(void *arg) {
 		pthread_mutex_unlock(&lock);
 
 		cover_image_t image;
+		cover_defer_player_store(true);
 		bool found = share_w > 0 ? cover_load_shared(path, share_w, share_h, size, &image)
 								  : cover_thumb_load(path, false, size, &image);
+		cover_defer_player_store(false);
 
 		pthread_mutex_lock(&lock);
 		slot->running = false;
@@ -293,6 +298,7 @@ static void *worker(void *arg) {
 			}
 		}
 		pthread_mutex_unlock(&lock);
+		cover_store_deferred();
 	}
 
 	return NULL;

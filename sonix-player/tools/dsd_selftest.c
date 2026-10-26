@@ -2,8 +2,10 @@
 //
 // Writes a one-second stereo .dsf holding a 1 kHz sine at half of DSD full
 // scale, for each rate from DSD64 to DSD512, plays it through dsd_to_pcm() and
-// checks the frequency and the level of what comes out. Also prints how long
-// the filter took per second of audio, the figure to scale for the device.
+// checks the frequency and the level of what comes out, and that the samples
+// are, to the bit, the filter's own definition worked out the long way. Also
+// prints how long the filter took per second of audio, the figure to scale for
+// the device.
 //
 //   gcc -O2 -Wall -I. tools/dsd_selftest.c src/system/decode/dsd.c -lpthread -lm -o /tmp/dsd_selftest
 //   /tmp/dsd_selftest [dir]      (dir defaults to $TMPDIR or /tmp)
@@ -88,6 +90,21 @@ static void write_dsf(const char *path, uint32_t rate) {
 	free(ch[1]);
 }
 
+// The filter the long way: the fourth-order CIC of one output period as one
+// plain convolution over the bits of the left channel. Output i's window
+// starts three periods before its own; the gain and the clamp as in dsd.c.
+static int32_t reference(const unsigned char *bits, const int32_t *h, int len, int period, uint64_t i) {
+	int sum_bits = 4 * (int)log2(period);
+	int64_t start = ((int64_t)i - 3) * period, acc = 0;
+	for (int m = 0; m < len; m++) {
+		int64_t n = start + m;
+		acc += (bits[n / 8] >> (n % 8)) & 1 ? h[m] : -h[m];
+	}
+	int64_t top = (1 << (sum_bits - 1)) - 1;
+	acc = acc > top ? top : acc < -top ? -top : acc;
+	return (int32_t)((uint32_t)acc << (32 - sum_bits));
+}
+
 static double seconds_now(void) {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -133,6 +150,32 @@ int main(int argc, char **argv) {
 			   took * 1000);
 		assert(fabs(hz - TONE_HZ) < 2.0);
 		assert(fabs(db - -6.02) < 0.5);
+
+		// Bit for bit, from the start and across a slab boundary (16384 frames
+		// at DSD64, every 2048 at DSD512) and the passes inside one.
+		int period = multiples[m] / 4, len = period;
+		int32_t *h = calloc(4 * (size_t)period, sizeof(int32_t)), *next = calloc(4 * (size_t)period, sizeof(int32_t));
+		unsigned char *bits = malloc(rate / 8);
+		assert(h && next && bits);
+		for (int k = 0; k < period; k++) {
+			h[k] = 1;
+		}
+		for (int order = 1; order < 4; order++, len += period - 1) {
+			memset(next, 0, 4 * (size_t)period * sizeof(int32_t));
+			for (int k = 0; k < len; k++) {
+				for (int j = 0; j < period; j++) {
+					next[k + j] += h[k];
+				}
+			}
+			memcpy(h, next, 4 * (size_t)period * sizeof(int32_t));
+		}
+		modulate(bits, rate, rate, 0);
+		for (uint64_t i = 3; i < 17000; i = i == 5000 ? 16000 : i + 1) {
+			assert(pcm[i * 2] == reference(bits, h, len, period, i));
+		}
+		free(bits);
+		free(next);
+		free(h);
 
 		free(pcm);
 		dsd_close(d);

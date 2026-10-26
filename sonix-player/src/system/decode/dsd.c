@@ -11,6 +11,9 @@
 // lookup-table filter to PCM (see dsd.h).
 
 #define MAX_CHANNELS 2
+// The PCM filter (see "to PCM"): its order, and the most coefficients of its second stage (DSD512).
+#define CIC_ORDER 4
+#define STAGE2_MAX (CIC_ORDER * (8 - 1) + 1)
 #define DSD64_RATE 2822400u
 
 // How much of one channel's bitstream a read pulls in.
@@ -64,7 +67,11 @@ struct dsd_file {
 	int step;	  // bytes of stream per channel per output frame
 	int taps;	  // filter length in bytes
 	int sum_bits; // the filter's coefficients sum to 1 << sum_bits
-	const int32_t (*table)[256];
+	const int32_t (*table)[256][4]; // the first stage
+	int r2;							// first-stage samples per output
+	int n2;							// second-stage coefficients
+	int32_t h2[STAGE2_MAX];
+	int32_t *s1; // first-stage samples of one pass
 };
 
 // ---------------------------------------------------------------------------
@@ -354,25 +361,32 @@ static bool produce(dsd_file_t *d) {
 // ---------------------------------------------------------------------------
 // to PCM
 //
-// A linear-phase FIR over the one-bit stream, decimating straight to
-// PCM_RATE. Every bit is +1 or -1, so the filter's work on one byte of stream
-// is one of 256 sums, worked out once per byte position: an output sample is
-// then one table lookup and one add per byte of the filter's span, with no
-// multiplications. The table is built for the file's bit order, so the stream
-// is read where it lies, byte for byte.
-//
-// The filter is a fourth-order CIC: four moving averages of one output period
+// A linear-phase FIR over the one-bit stream, decimating to PCM_RATE. The
+// filter is a fourth-order CIC: four moving averages of one output period
 // (16, 32, 64 or 128 bits) in a row. Its zeros sit exactly on the multiples of
 // 176.4 kHz, which are the only bands that fold back under 20 kHz here, so it
-// rejects them by 77 dB or more while spanning 8, 16, 32 or 64 bytes, half of
-// what a windowed sinc needs for the same rejection. What it lets through
-// between those bands, and its droop of 1.6 dB at 20 kHz, are the half-band
-// decimator's to deal with (decimate.h), which takes the result down to the
-// headphones' rate anyway. The coefficients are integers summing to a power
-// of two, so the tables are exact.
+// rejects them by 77 dB or more. What it lets through between those bands,
+// and its droop of 1.6 dB at 20 kHz, are the half-band decimator's to deal
+// with (decimate.h), which takes the result down to the headphones' rate
+// anyway. The coefficients are integers summing to a power of two, so every
+// sum below is exact.
 //
-// Per second of stereo that is 2.8, 5.6, 11.3 or 22.6 million lookups, into a
-// table of 8, 16, 32 or 64 KB.
+// It runs in two stages, which give the same integers as the one filter: a
+// moving average of 8P bits is one of 16 bits followed by one of P taken every
+// 16th bit, so the fourth power splits the same way.
+//
+//   1. The CIC of a 16-bit period over the bits, one sample every two bytes
+//      (DSD512: 1.4112 MHz). Every bit is +1 or -1, so a byte's share of a
+//      sample is one of 256 sums: one table lookup and one add per byte of
+//      the 8-byte window, no multiplications. Each byte sits in four windows,
+//      and the table keeps its four sums side by side, so a byte costs one
+//      line of an 8 KB table that stays in the cache.
+//   2. The CIC of a period of 1, 2, 4 or 8 over those samples (5 to 29
+//      coefficients), one output every period.
+//
+// The single table this replaces spanned 8 to 64 bytes per output, 64 KB at
+// DSD512, four times the data cache: measured on the Blaze, the DSD512 filter
+// took half the CPU.
 //
 // Gain +6 dB: a full-scale DSD signal is 50 % modulation, half of what the
 // stream can carry, so without it DSD plays 6 dB quieter than PCM. What goes
@@ -380,58 +394,63 @@ static bool produce(dsd_file_t *d) {
 // ---------------------------------------------------------------------------
 
 #define PCM_RATE 176400
-#define CIC_ORDER 4
+#define STAGE1_PERIOD 16 // bits: two bytes of stream per first-stage sample
+// Outputs per pass of the two stages: the first stage's samples for them
+// (1045 at most) stay in the cache next to the table.
+#define PASS_FRAMES 128
 
-// DSD64, 128, 256, 512, each in the two bit orders.
-static const int32_t (*tables[4][2])[256];
+// The first stage, in the two bit orders: [byte of the 16-bit period][byte
+// value][which of the four windows holding the byte, earliest first].
+static const int32_t (*tables[2])[256][4];
 static pthread_mutex_t table_lock = PTHREAD_MUTEX_INITIALIZER;
 
-// `period` is the bits per output sample; `taps` the span in bytes, enough for
-// CIC_ORDER * (period - 1) + 1 coefficients.
-static const int32_t (*table_for(int multiple, int period, int taps, bool lsb_first))[256] {
-	int which = multiple == 64 ? 0 : multiple == 128 ? 1 : multiple == 256 ? 2 : 3;
-	pthread_mutex_lock(&table_lock);
-	if (!tables[which][lsb_first]) {
-		int n = taps * 8;
-		int32_t *h = calloc((size_t)n, sizeof(int32_t));
-		int32_t *next = calloc((size_t)n, sizeof(int32_t));
-		int32_t (*t)[256] = malloc(sizeof(int32_t) * 256 * (size_t)taps);
-		if (h && next && t) {
-			// One moving average, convolved with itself CIC_ORDER - 1 times.
-			for (int i = 0; i < period; i++) {
-				h[i] = 1;
-			}
-			int len = period;
-			for (int order = 1; order < CIC_ORDER; order++) {
-				memset(next, 0, sizeof(int32_t) * (size_t)n);
-				for (int i = 0; i < len; i++) {
-					for (int j = 0; j < period; j++) {
-						next[i + j] += h[i];
-					}
-				}
-				len += period - 1;
-				memcpy(h, next, sizeof(int32_t) * (size_t)n);
-			}
-			for (int k = 0; k < taps; k++) {
-				for (int v = 0; v < 256; v++) {
-					int32_t acc = 0;
-					for (int b = 0; b < 8; b++) {
-						// The earliest bit of the byte is bit 0 in a .dsf, bit 7
-						// in a .dff.
-						int bit = lsb_first ? (v >> b) & 1 : (v >> (7 - b)) & 1;
-						acc += bit ? h[k * 8 + b] : -h[k * 8 + b];
-					}
-					t[k][v] = acc;
-				}
-			}
-			tables[which][lsb_first] = (const int32_t (*)[256])t;
-			t = NULL;
-		}
-		free(t);
-		free(next);
-		free(h);
+// One moving average of `period`, convolved with itself CIC_ORDER - 1 times:
+// CIC_ORDER * (period - 1) + 1 coefficients into h.
+static void cic_coefficients(int32_t *h, int period) {
+	int32_t next[CIC_ORDER * (STAGE1_PERIOD - 1) + 1];
+	for (int i = 0; i < period; i++) {
+		h[i] = 1;
 	}
-	const int32_t (*t)[256] = tables[which][lsb_first];
+	int len = period;
+	for (int order = 1; order < CIC_ORDER; order++) {
+		memset(next, 0, sizeof(int32_t) * (size_t)(len + period - 1));
+		for (int i = 0; i < len; i++) {
+			for (int j = 0; j < period; j++) {
+				next[i + j] += h[i];
+			}
+		}
+		len += period - 1;
+		memcpy(h, next, sizeof(int32_t) * (size_t)len);
+	}
+}
+
+static const int32_t (*table_for(bool lsb_first))[256][4] {
+	pthread_mutex_lock(&table_lock);
+	if (!tables[lsb_first]) {
+		int32_t h[STAGE1_PERIOD / 2 * 8] = {0}; // 61 coefficients over a 64-bit window
+		cic_coefficients(h, STAGE1_PERIOD);
+		int32_t (*t)[256][4] = malloc(sizeof(int32_t) * 2 * 256 * 4);
+		if (t) {
+			for (int j = 0; j < 2; j++) {
+				for (int v = 0; v < 256; v++) {
+					for (int q = 0; q < 4; q++) {
+						// In the q-th window holding it, the byte is byte k of the window.
+						int k = 2 * (3 - q) + j;
+						int32_t acc = 0;
+						for (int b = 0; b < 8; b++) {
+							// The earliest bit of the byte is bit 0 in a .dsf, bit 7
+							// in a .dff.
+							int bit = lsb_first ? (v >> b) & 1 : (v >> (7 - b)) & 1;
+							acc += bit ? h[k * 8 + b] : -h[k * 8 + b];
+						}
+						t[j][v][q] = acc;
+					}
+				}
+			}
+			tables[lsb_first] = (const int32_t (*)[256][4])t;
+		}
+	}
+	const int32_t (*t)[256][4] = tables[lsb_first];
 	pthread_mutex_unlock(&table_lock);
 	return t;
 }
@@ -441,6 +460,23 @@ static const int32_t (*table_for(int multiple, int period, int taps, bool lsb_fi
 static void history_clear(dsd_file_t *d) {
 	for (int c = 0; c < d->channels; c++) {
 		memset(d->chan[c] - d->taps, 0x69, (size_t)d->taps);
+	}
+}
+
+// Stage 1: s1[k] for k < count, the window of 8 bytes from p + 2k. Two bytes
+// at a time, each block of them finishes the oldest of the four samples it
+// adds to and starts a new one.
+static void stage1(const unsigned char *p, const int32_t (*t)[256][4], int32_t *s1, int count) {
+	int32_t a0 = 0, a1 = 0, a2 = 0;
+	for (int k = -3; k < count; k++, p += 2) {
+		const int32_t *e = t[0][p[0]], *f = t[1][p[1]];
+		a0 += e[0] + f[0];
+		if (k >= 0) {
+			s1[k] = a0;
+		}
+		a0 = a1 + e[1] + f[1];
+		a1 = a2 + e[2] + f[2];
+		a2 = e[3] + f[3];
 	}
 }
 
@@ -470,23 +506,27 @@ static bool produce_pcm(dsd_file_t *d) {
 			d->chan_read = d->chan_len; // a tail shorter than one frame
 			continue;
 		}
-		const int32_t (*t)[256] = d->table;
-		int taps = d->taps;
+		const int r2 = d->r2, n2 = d->n2;
 		for (int c = 0; c < d->channels; c++) {
-			// The window of an output frame ends with the last byte it takes in.
-			const unsigned char *p = d->chan[c] + d->chan_read + d->step - taps;
 			int32_t *out = d->pcm + c;
-			for (int i = 0; i < frames; i++, p += d->step, out += d->channels) {
-				int32_t acc = 0;
-				for (int k = 0; k < taps; k += 4) {
-					acc += t[k][p[k]] + t[k + 1][p[k + 1]] + t[k + 2][p[k + 2]] + t[k + 3][p[k + 3]];
+			for (int first = 0; first < frames; first += PASS_FRAMES) {
+				int n = frames - first < PASS_FRAMES ? frames - first : PASS_FRAMES;
+				// An output's window starts three periods before its own, in the
+				// history for the first ones.
+				stage1(d->chan[c] + d->chan_read + (first - 3) * d->step, d->table, d->s1, r2 * (n - 1) + n2);
+				for (int i = 0; i < n; i++, out += d->channels) {
+					const int32_t *s = d->s1 + r2 * i;
+					int32_t acc = 0;
+					for (int r = 0; r < n2; r++) {
+						acc += d->h2[r] * s[r];
+					}
+					if (acc > top) {
+						acc = top;
+					} else if (acc < -top) {
+						acc = -top;
+					}
+					*out = (int32_t)((uint32_t)acc << shift);
 				}
-				if (acc > top) {
-					acc = top;
-				} else if (acc < -top) {
-					acc = -top;
-				}
-				*out = (int32_t)((uint32_t)acc << shift);
 			}
 		}
 		d->chan_read += frames * d->step;
@@ -502,11 +542,13 @@ bool dsd_to_pcm(dsd_file_t *d) {
 	if (d->pcm_mode) {
 		return true;
 	}
-	int step = d->multiple / 32;					   // 2, 4, 8 or 16 bytes: 176.4 kHz out
-	int period = step * 8;							   // 16, 32, 64 or 128 bits
-	int taps = (CIC_ORDER * (period - 1) + 1 + 7) / 8; // 8, 16, 32 or 64 bytes
-	const int32_t (*table)[256] = table_for(d->multiple, period, taps, d->lsb_first);
-	if (!table) {
+	int step = d->multiple / 32; // 2, 4, 8 or 16 bytes: 176.4 kHz out
+	int taps = 4 * step;		 // the window, CIC_ORDER periods: 8, 16, 32 or 64 bytes
+	int r2 = step / 2;			 // first-stage samples per output: 1, 2, 4 or 8
+	const int32_t (*table)[256][4] = table_for(d->lsb_first);
+	int32_t *s1 = malloc(sizeof(int32_t) * (size_t)(r2 * (PASS_FRAMES - 1) + STAGE2_MAX));
+	if (!table || !s1) {
+		free(s1);
 		return false;
 	}
 	// Each channel's buffer grows a history of `taps` bytes in front.
@@ -517,6 +559,7 @@ bool dsd_to_pcm(dsd_file_t *d) {
 			for (int k = 0; k < c; k++) {
 				free(lines[k]);
 			}
+			free(s1);
 			return false;
 		}
 	}
@@ -526,8 +569,12 @@ bool dsd_to_pcm(dsd_file_t *d) {
 	}
 	d->step = step;
 	d->taps = taps;
-	d->sum_bits = CIC_ORDER * (period == 16 ? 4 : period == 32 ? 5 : period == 64 ? 6 : 7); // period^order
+	d->sum_bits = CIC_ORDER * (step == 2 ? 4 : step == 4 ? 5 : step == 8 ? 6 : 7); // (8 * step)^order
 	d->table = table;
+	d->r2 = r2;
+	d->n2 = CIC_ORDER * (r2 - 1) + 1;
+	cic_coefficients(d->h2, r2);
+	d->s1 = s1;
 	d->pcm_mode = true;
 	d->out_rate = PCM_RATE;
 	d->total_out = d->bytes_per_ch / (uint64_t)step;
@@ -536,7 +583,7 @@ bool dsd_to_pcm(dsd_file_t *d) {
 	d->pcm_frames = 0;
 	d->pcm_read = 0;
 	history_clear(d);
-	printf("dsd: DSD%d filtered to PCM %d Hz (%d-byte filter)\n", d->multiple, PCM_RATE, taps);
+	printf("dsd: DSD%d filtered to PCM %d Hz (8-byte table, %d-tap second stage)\n", d->multiple, PCM_RATE, d->n2);
 	return true;
 }
 
@@ -626,6 +673,7 @@ void dsd_close(dsd_file_t *d) {
 	}
 	free(d->raw);
 	free(d->pcm);
+	free(d->s1);
 	if (d->fd >= 0) {
 		close(d->fd);
 	}

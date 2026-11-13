@@ -463,6 +463,8 @@ test:
 	$(CC) -O2 -Wall -I. -DBOOTLOGO_CUSTOM_FILE='"$(CURDIR)/$(TEST_DIR)/bootlogo.jpeg"' tools/bootlogo_selftest.c \
 		src/system/device/bootlogo.c $(IMAGE_TEST_SRCS) -lpthread -lm -ldl -o $(TEST_DIR)/bootlogo_selftest
 	$(TEST_DIR)/bootlogo_selftest $(TEST_DIR)
+	$(CC) -O2 -Wall -I. tools/axpcharge_selftest.c -o $(TEST_DIR)/axpcharge_selftest
+	$(TEST_DIR)/axpcharge_selftest $(TEST_DIR) > $(TEST_DIR)/axpcharge_selftest.log
 	@echo "test: all self-checks passed."
 
 # The flags every target object was compiled with, the optimisation levels

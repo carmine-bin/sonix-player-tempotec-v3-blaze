@@ -1,7 +1,7 @@
 name: Self-checks
 
 # make test: the host self-checks in sonix-player/tools/*_selftest.c (battery
-# usage counts, DSD filter, custom boot logo). Plain gcc, no toolchain, about
+# usage counts, DSD filter, custom boot logo, the Blaze charge policy). Plain gcc, no toolchain, about
 # half a minute with the LVGL clone.
 
 on:

@@ -141,6 +141,7 @@ static const char FAKE_WPA_CLI[] =
 	"  echo OK ;;\n"
 	"remove_network)\n"
 	"  if [ -e \"$D/noremove\" ]; then echo FAIL; exit 0; fi\n"
+	"  if [ -e \"$D/hangremove\" ]; then echo \"'REMOVE_NETWORK $2' command timed out.\"; exit 254; fi\n"
 	"  awk -F '\\t' -v id=\"$2\" '$1 != id' \"$D/nets\" > \"$D/nets.new\"; mv \"$D/nets.new\" \"$D/nets\"; echo OK ;;\n"
 	"select_network)\n"
 	"  rm -f \"$D/states\"\n"
@@ -630,7 +631,16 @@ static void check_forget(void) {
 	assert(wait_for_op() == WIFI_OP_FAILED);
 	drop("noremove");
 	assert(count_lines(log_since("forget refused"), "save_config") == 0);
-	printf("selftest: forget goes through wpa_cli, and the list follows it at once\n");
+
+	// Nor one it never answered: wpa_cli's "command timed out." on stdout,
+	// with a non-zero exit.
+	put("hangremove", "");
+	mark_log("forget timed out");
+	wifi_forget("Otra");
+	assert(wait_for_op() == WIFI_OP_FAILED);
+	drop("hangremove");
+	assert(count_lines(log_since("forget timed out"), "save_config") == 0);
+	printf("selftest: forget goes through wpa_cli, saves only a removal it was told of, and the list follows it at once\n");
 }
 
 int main(int argc, char **argv) {
@@ -651,6 +661,7 @@ int main(int argc, char **argv) {
 	drop("log");
 	drop("netfile");
 	drop("noremove");
+	drop("hangremove");
 	drop("states");
 	drop("ctrl");
 	drop("nosock");

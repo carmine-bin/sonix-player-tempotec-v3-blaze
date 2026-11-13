@@ -1377,7 +1377,10 @@ static void do_forget(const char *ssid) {
 	snprintf(id_text, sizeof(id_text), "%d", id);
 	int rc = wpa2("remove_network", id_text, out, sizeof(out));
 	if (rc == 0 || out[0]) {
-		done = wpa_ok(out);
+		// The exit status too: a supplicant that does not answer in time gets
+		// "'REMOVE_NETWORK n' command timed out." on stdout and a non-zero exit,
+		// which wpa_ok() alone would take for a removal.
+		done = rc == 0 && wpa_ok(out);
 		if (done) {
 			wpa1("save_config", out, sizeof(out));
 			if (!wpa_ok(out)) {

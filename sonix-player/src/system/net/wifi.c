@@ -34,9 +34,18 @@
 #define WIFI_RESULT_FILE "/data/wifi_result.txt"
 #endif
 #define WIFI_STATUS_FILE "/data/wifi_status.txt"
+#ifndef WIFI_NETWORK_FILE
 #define WIFI_NETWORK_FILE "/data/wifi_network.txt"
+#endif
 
 #define WPA_CLI "wpa_cli"
+
+// The supplicant's control socket: ctrl_interface=/var/run/wpa_supplicant in
+// the stock /etc/wpa_supplicant.conf, which S43wifi_bcm_init_config also writes
+// into /data/wpa_supplicant.conf, and the directory wpa_cli opens without -p.
+#ifndef WPA_CTRL_SOCKET // the self-check points it elsewhere
+#define WPA_CTRL_SOCKET "/var/run/wpa_supplicant/" WIFI_IFACE
+#endif
 #define UDHCPC "udhcpc"
 #define WIFI_ON_SCRIPT "/usr/bin/wifi_on.sh"
 #define WIFI_OFF_SCRIPT "/usr/bin/wifi_off.sh"
@@ -518,11 +527,17 @@ static void read_scan_results(char *buf, size_t size) {
 	slurp(WIFI_RESULT_FILE, buf, size);
 }
 
+// The same rule for the saved list. sys_server rewrites its file only when it
+// joins or lists, and when the supplicant reports a link going up or down
+// (0x40496c, 0x404bc8, 0x405878, 0x437a4c, 0x437b3c, 0x437c38) -- never for a
+// network removed -- so after a forget the file still names it, under an id
+// the supplicant no longer has. An empty list from wpa_cli is an answer too:
+// nothing saved.
 static void read_saved_networks(char *buf, size_t size) {
-	if (slurp(WIFI_NETWORK_FILE, buf, size) && strchr(buf, '\t')) {
+	if (wpa1("list_networks", buf, size) == 0) {
 		return;
 	}
-	wpa1("list_networks", buf, size);
+	slurp(WIFI_NETWORK_FILE, buf, size);
 }
 
 static void read_status(char *buf, size_t size) {
@@ -636,19 +651,30 @@ static void enable_all_networks(bool save) {
 // Down matters as much as up: a WIFI:OFF followed at once by a WIFI:ON (the
 // switch flicked twice) would otherwise find the old supplicant still answering,
 // call the radio up, and have it killed a moment later by the queued OFF.
+//
+// Down is read off the control socket, which the supplicant removes on its way
+// out, and not asked over it: a status sent while it is shutting down can go
+// unanswered until wpa_cli's own 10 s timeout (09:58:22 -> 09:58:32 on a
+// Blaze). With no socket at that path while it still runs, it is asked after
+// all. Either way the time is the clock's, not a count of rounds.
 static bool wait_for_supplicant(bool up) {
 	char buf[512];
 	int limit = up ? SUPPLICANT_UP_MS : SUPPLICANT_DOWN_MS;
-	for (int waited = 0; waited < limit; waited += SUPPLICANT_POLL_MS) {
+	bool by_socket = !up && access(WPA_CTRL_SOCKET, F_OK) == 0;
+	uint32_t start = now_ms();
+	int waited = 0;
+	while (waited < limit) {
 		sleep_ms(SUPPLICANT_POLL_MS);
-		bool answers = wpa1("status", buf, sizeof(buf)) == 0 && strstr(buf, "wpa_state=");
+		bool answers = by_socket ? access(WPA_CTRL_SOCKET, F_OK) == 0
+								 : wpa1("status", buf, sizeof(buf)) == 0 && strstr(buf, "wpa_state=");
+		waited = (int)(now_ms() - start);
 		if (answers == up) {
-			printf("wifi: wpa_supplicant %s after %d ms\n", up ? "answered" : "gone",
-				   waited + SUPPLICANT_POLL_MS);
+			printf("wifi: wpa_supplicant %s after %d ms%s\n", up ? "answered" : "gone", waited,
+				   up || by_socket ? "" : " (asked: no control socket)");
 			return true;
 		}
 	}
-	printf("wifi: wpa_supplicant still %s after %d ms\n", up ? "silent" : "answering", limit);
+	printf("wifi: wpa_supplicant still %s after %d ms\n", up ? "silent" : "answering", waited);
 	return false;
 }
 
@@ -811,19 +837,13 @@ static void do_scan(void) {
 	}
 }
 
-// The id wpa_supplicant knows this SSID under, or -1.
-//
-// This one asks wpa_cli and only falls back to the file sys_server wrote, which
-// is the opposite of what the list on screen does, and deliberately. The file
-// is rewritten only when a scan is asked for, so between two scans it can name
-// networks under numbers wpa_supplicant has since given to something else --
-// and unlike a row drawn one id out of date, "WIFI:CONNECT:wlan0 3" with a
-// stale 3 joins the wrong network or nothing at all.
+// The id wpa_supplicant knows this SSID under, or -1. From wpa_cli, like the
+// list on screen: the file sys_server wrote can name networks under numbers
+// wpa_supplicant has since removed or given to something else, and a stale id
+// joins the wrong network or nothing at all.
 static int saved_network_id(const char *ssid) {
 	static char buf[4096];
-	if (!(wpa1("list_networks", buf, sizeof(buf)) == 0 && strchr(buf, '\t'))) {
-		read_saved_networks(buf, sizeof(buf));
-	}
+	read_saved_networks(buf, sizeof(buf));
 
 	char *save_line = NULL;
 	for (char *line = strtok_r(buf, "\n", &save_line); line; line = strtok_r(NULL, "\n", &save_line)) {
@@ -1045,11 +1065,20 @@ static direct_result_t connect_direct(const char *ssid, const char *psk, int *id
 // GROUP_HANDSHAKE -- and the wait simply lets it. Only a supplicant that has
 // been sitting in DISCONNECTED or INACTIVE for ASSOC_PARKED_MS without moving
 // counts as one that has stopped trying.
+//
+// The exception is a four-way handshake that falls back to SCANNING,
+// DISCONNECTED or INACTIVE without completing: the access point dropped it,
+// which is what it does with a wrong passphrase (reason 15 after ~10 s), and
+// the supplicant would only go round again until the wait ran out. That is the
+// verdict, as for the stock sys_server, which reports the first "4-Way
+// Handshake failed" (0x437b90).
 static bool wait_for_association(bool *saw_handshake) {
 	static char buf[2048];
 	char state[32];
 	char last[32] = "";
 	int parked_ms = 0;
+	bool in_handshake = false;
+	uint32_t start = now_ms();
 
 	if (saw_handshake) {
 		*saw_handshake = false;
@@ -1071,8 +1100,17 @@ static bool wait_for_association(bool *saw_handshake) {
 		}
 		// Reaching the four-way handshake means the access point was there and
 		// answered to this name: whatever goes wrong after it is the key.
-		if (saw_handshake && strcmp(state, "4WAY_HANDSHAKE") == 0) {
-			*saw_handshake = true;
+		if (strcmp(state, "4WAY_HANDSHAKE") == 0) {
+			in_handshake = true;
+			if (saw_handshake) {
+				*saw_handshake = true;
+			}
+		} else if (strcmp(state, "GROUP_HANDSHAKE") == 0) {
+			in_handshake = false; // the four-way part is done: the key was right
+		} else if (in_handshake && (strcmp(state, "SCANNING") == 0 || strcmp(state, "DISCONNECTED") == 0 ||
+									strcmp(state, "INACTIVE") == 0)) {
+			printf("wifi: the four-way handshake failed; verdict after %u ms\n", (unsigned)(now_ms() - start));
+			return false;
 		}
 		if (strcmp(state, "DISCONNECTED") == 0 || strcmp(state, "INACTIVE") == 0) {
 			parked_ms += ASSOC_POLL_MS;
@@ -1151,7 +1189,7 @@ static void do_connect(const char *ssid, const char *psk) {
 	// The length is worth having in the log next to the name: a name that came
 	// out short is the whole story, and quotes alone do not show it.
 	printf("wifi: joining \"%s\" (%d characters, %s)\n", ssid, (int)strlen(ssid),
-		   has_psk ? "with a passphrase" : "open");
+		   has_psk ? "with a passphrase" : "no passphrase typed: saved or open");
 
 	// wpa_cli first, sys_server second, which is the other way round from every
 	// other request in this file -- and deliberately.
@@ -1330,20 +1368,29 @@ static void do_forget(const char *ssid) {
 
 	bool was_current = is_current_network(ssid);
 
+	// wpa_cli first: it is done when it answers, so the list read below no
+	// longer has the network. sys_server's WIFI:REMOVE answers OK when it
+	// queues the work and runs it up to a second later, after that read.
 	bool done = false;
-	if (have_sysserver()) {
+	char id_text[16];
+	char out[128];
+	snprintf(id_text, sizeof(id_text), "%d", id);
+	int rc = wpa2("remove_network", id_text, out, sizeof(out));
+	if (rc == 0 || out[0]) {
+		done = wpa_ok(out);
+		if (done) {
+			wpa1("save_config", out, sizeof(out));
+			if (!wpa_ok(out)) {
+				printf("wifi: network %s removed, but save_config failed (%s)\n", id_text, out[0] ? out : "no reply");
+			}
+		} else {
+			printf("wifi: remove_network %s failed (%s)\n", id_text, out[0] ? out : "no reply");
+		}
+	} else if (have_sysserver()) {
 		char command[64];
 		char reply[128];
 		snprintf(command, sizeof(command), "WIFI:REMOVE:%s %d", WIFI_IFACE, id);
 		done = sysserver_request(command, reply, sizeof(reply)) == 0;
-	}
-
-	if (!done) {
-		char id_text[16];
-		char out[128];
-		snprintf(id_text, sizeof(id_text), "%d", id);
-		done = wpa2("remove_network", id_text, out, sizeof(out)) == 0;
-		wpa1("save_config", out, sizeof(out));
 	}
 
 	// Removing a network does not always bring the link down with it -- the

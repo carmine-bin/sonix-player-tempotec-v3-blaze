@@ -26,8 +26,12 @@ static int fake_nanosleep(const struct timespec *req, struct timespec *rem) {
 	return nanosleep(&scaled, rem);
 }
 static int fake_access(const char *path, int mode);
-static char result_file[600]; // sys_server's /data/wifi_result.txt
+static char result_file[600];  // sys_server's /data/wifi_result.txt
+static char network_file[600]; // and its /data/wifi_network.txt
+static char ctrl_socket[600];  // /var/run/wpa_supplicant/wlan0
 #define WIFI_RESULT_FILE result_file
+#define WIFI_NETWORK_FILE network_file
+#define WPA_CTRL_SOCKET ctrl_socket
 #define nanosleep fake_nanosleep
 #define access fake_access
 #include "src/system/net/wifi.c"
@@ -105,6 +109,7 @@ static const char FAKE_WPA_CLI[] =
 	"#!/bin/sh\n"
 	"D=\"$WIFI_FAKE\"\n"
 	"shift 2\n"
+	"if [ -e \"$D/dying\" ]; then echo \"$* (dying)\" >> \"$D/log\"; sleep 2; exit 255; fi\n"
 	"case \"$1\" in scan|scan_results) [ -e \"$D/noscan\" ] && { echo \"$* (refused)\" >> \"$D/log\"; exit 255; } ;; esac\n"
 	"if [ ! -e \"$D/up\" ]; then echo \"$* (no supplicant)\" >> \"$D/log\"; exit 255; fi\n"
 	"echo \"$*\" >> \"$D/log\"\n"
@@ -112,6 +117,9 @@ static const char FAKE_WPA_CLI[] =
 	"status)\n"
 	"  if [ -e \"$D/joined\" ]; then\n"
 	"    printf 'ssid=%s\\nwpa_state=COMPLETED\\nip_address=192.168.1.9\\naddress=00:11:22:33:44:55\\n' \"$(cat \"$D/joined\")\"\n"
+	"  elif [ -s \"$D/states\" ]; then\n"
+	"    printf 'wpa_state=%s\\naddress=00:11:22:33:44:55\\n' \"$(head -n 1 \"$D/states\")\"\n"
+	"    if [ \"$(wc -l < \"$D/states\")\" -gt 1 ]; then sed -i 1d \"$D/states\"; fi\n"
 	"  else printf 'wpa_state=DISCONNECTED\\naddress=00:11:22:33:44:55\\n'; fi ;;\n"
 	"signal_poll) printf 'RSSI=%s\\nLINKSPEED=65\\n' \"$(cat \"$D/rssi\" 2>/dev/null || echo -50)\" ;;\n"
 	"scan) touch \"$D/scanned\"; echo 1 > \"$D/pending\"; echo OK ;;\n"
@@ -132,13 +140,19 @@ static const char FAKE_WPA_CLI[] =
 	"  if [ \"$3\" = psk ]; then echo \"$4\" > \"$D/psk.$2\"; fi\n"
 	"  echo OK ;;\n"
 	"remove_network)\n"
+	"  if [ -e \"$D/noremove\" ]; then echo FAIL; exit 0; fi\n"
 	"  awk -F '\\t' -v id=\"$2\" '$1 != id' \"$D/nets\" > \"$D/nets.new\"; mv \"$D/nets.new\" \"$D/nets\"; echo OK ;;\n"
 	"select_network)\n"
+	"  rm -f \"$D/states\"\n"
 	"  name=$(awk -F '\\t' -v id=\"$2\" '$1 == id { printf \"%s\", $2 }' \"$D/nets\")\n"
 	"  if awk -F '\\t' -v n=\"$name\" '$5 == n { f = 1 } END { exit !f }' \"$D/air\" &&\n"
 	"     ! grep -qx '\"wrongpass1\"' \"$D/psk.$2\" 2>/dev/null; then\n"
 	"    printf '%s' \"$name\" > \"$D/joined\"\n"
-	"  else rm -f \"$D/joined\"; fi\n"
+	"  else\n"
+	"    rm -f \"$D/joined\"\n"
+	"    grep -qx '\"wrongpass1\"' \"$D/psk.$2\" 2>/dev/null &&\n"
+	"      printf 'SCANNING\\n4WAY_HANDSHAKE\\n4WAY_HANDSHAKE\\nSCANNING\\n' > \"$D/states\"\n"
+	"  fi\n"
 	"  echo OK ;;\n"
 	"*) echo OK ;;\n"
 	"esac\n";
@@ -160,16 +174,28 @@ static pthread_mutex_t ss_lock = PTHREAD_MUTEX_INITIALIZER;
 static char ss_queue[16][96];
 static int ss_head, ss_count;
 static bool ss_running;
-static int ss_scans; // WIFI:SCAN requests seen
+static int ss_scans;   // WIFI:SCAN requests seen
+static int ss_removes; // WIFI:REMOVE requests seen
 
 static void ss_execute(const char *command) {
 	if (strncmp(command, "WIFI:ON:", 8) == 0) {
 		usleep(150000); // wifi_on.sh: killall, ifconfig, wpa_supplicant -B ...
 		drop("scanned");
 		put("up", "");
+		if (!exists("nosock")) {
+			put("ctrl", "");
+		}
 	} else if (strncmp(command, "WIFI:OFF:", 9) == 0) {
+		// wifi_off.sh's killall: the supplicant takes a moment to go, and a
+		// request sent to it meanwhile goes unanswered (2 s here, 10 s on the
+		// device). The socket goes last.
+		put("dying", "");
+		usleep(300000);
 		drop("up");
 		drop("joined");
+		drop("states");
+		drop("ctrl");
+		drop("dying");
 	} else if (strncmp(command, "WIFI:SCAN:", 10) == 0) {
 		// The dump is taken when the sweep is asked for: it holds the last
 		// finished one, and this one finishes a little later.
@@ -224,6 +250,9 @@ int sysserver_request(const char *command, char *reply, size_t reply_size) {
 	ss_count++;
 	if (strncmp(command, "WIFI:SCAN:", 10) == 0) {
 		ss_scans++;
+	}
+	if (strncmp(command, "WIFI:REMOVE:", 12) == 0) {
+		ss_removes++;
 	}
 	pthread_mutex_unlock(&ss_lock);
 	if (reply && reply_size) {
@@ -449,10 +478,16 @@ static void check_connect(void) {
 	assert(count_lines(log, "remove_network 2") == 1 && count_lines(log, "save_config") == 0);
 
 	// A wrong passphrase re-entered for a saved network goes into a new entry,
-	// which is dropped; the saved one is never written over.
+	// which is dropped; the saved one is never written over. The supplicant
+	// goes from the handshake back to SCANNING, as it does when the access
+	// point gives up on it, and that is the verdict: no waiting out the 30 s
+	// (3 s here) while it goes round again.
 	mark_log("wrong again");
+	uint32_t asked = now_ms();
 	wifi_connect("Casa", "wrongpass1");
 	assert(wait_for_op() == WIFI_OP_FAILED);
+	assert(now_ms() - asked < 1500);
+	assert(wifi_last_failure() == WIFI_FAIL_WRONG_KEY);
 	log = log_since("wrong again");
 	assert(count_lines(log, "set_network 1 psk \"wrongpass1\"") == 0);
 	assert(count_lines(log, "set_network 2 psk \"wrongpass1\"") == 1);
@@ -514,6 +549,90 @@ static void check_bars(void) {
 	printf("selftest: bars at -60 / -70 / -90, as stock\n");
 }
 
+// Off is read off the control socket, so the wait never asks the supplicant
+// that is going away; with no socket where it is expected, it asks after all.
+static void check_off_reads_the_socket(void) {
+	settle();
+	mark_log("off");
+	uint32_t asked = now_ms();
+	wifi_set_enabled(false);
+	assert(wait_until(not_busy, 5000));
+	assert(now_ms() - asked < 1500); // a dying status would take 2 s
+	assert(!exists("up"));
+	assert(count_lines(log_since("off"), "status (dying)") == 0);
+
+	put("nosock", "");
+	wifi_set_enabled(true);
+	assert(wait_until(not_busy, 5000));
+	assert(exists("up") && !exists("ctrl"));
+	mark_log("off asked");
+	wifi_set_enabled(false);
+	assert(wait_until(not_busy, 8000));
+	assert(!exists("up"));
+	const char *log = log_since("off asked");
+	assert(line_at(log, "status") >= 0 || line_at(log, "status (no supplicant)") >= 0 ||
+		   line_at(log, "status (dying)") >= 0);
+	drop("nosock");
+	wifi_set_enabled(true);
+	assert(wait_until(not_busy, 5000));
+	assert(exists("up") && exists("ctrl"));
+	printf("selftest: off waits on the control socket, and asks only without one\n");
+}
+
+static bool listed_as_saved(const char *ssid) {
+	wifi_network_t nets[WIFI_MAX_NETWORKS];
+	int n = wifi_get_networks(nets, WIFI_MAX_NETWORKS);
+	for (int i = 0; i < n; i++) {
+		if (strcmp(nets[i].ssid, ssid) == 0) {
+			return nets[i].saved;
+		}
+	}
+	return false;
+}
+
+// Forgetting goes through wpa_cli, saves only once the removal is taken, and
+// the list no longer calls the network saved -- even though sys_server's file,
+// which it does not rewrite on a removal, still names it.
+static void check_forget(void) {
+	settle();
+	int casa = saved_network_id("Casa");
+	assert(casa >= 0 && saved_network_id("Otra") == 0);
+	char dump[256];
+	snprintf(dump, sizeof(dump), "network id / ssid / bssid / flags\n0\tOtra\tany\t[DISABLED]\n%d\tCasa\tany\t[CURRENT]\n",
+			 casa);
+	put("netfile", dump);
+	int removes_before = ss_removes;
+
+	mark_log("forget");
+	wifi_forget("Casa");
+	assert(wait_for_op() == WIFI_OP_OK);
+	settle();
+	const char *log = log_since("forget");
+	char removed[64];
+	snprintf(removed, sizeof(removed), "remove_network %d", casa);
+	assert(line_at(log, removed) >= 0 && line_at(log, "save_config") > line_at(log, removed));
+	assert(ss_removes == removes_before); // not the queued WIFI:REMOVE
+	assert(saved_network_id("Casa") < 0);
+	assert(!listed_as_saved("Casa"));
+
+	// The last one: wpa_cli lists nothing, and nothing is what counts.
+	wifi_forget("Otra");
+	assert(wait_for_op() == WIFI_OP_OK);
+	settle();
+	assert(saved_network_id("Otra") < 0);
+	assert(!listed_as_saved("Otra"));
+
+	// A removal the supplicant turns down is not saved, and says so.
+	put("nets", "0\tOtra\tany\t[DISABLED]\n");
+	put("noremove", "");
+	mark_log("forget refused");
+	wifi_forget("Otra");
+	assert(wait_for_op() == WIFI_OP_FAILED);
+	drop("noremove");
+	assert(count_lines(log_since("forget refused"), "save_config") == 0);
+	printf("selftest: forget goes through wpa_cli, and the list follows it at once\n");
+}
+
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		fprintf(stderr, "usage: %s WORKDIR\n", argv[0]);
@@ -522,12 +641,20 @@ int main(int argc, char **argv) {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	snprintf(dir, sizeof(dir), "%s/wifi", argv[1]);
 	snprintf(result_file, sizeof(result_file), "%s/result", dir);
+	snprintf(network_file, sizeof(network_file), "%s/netfile", dir);
+	snprintf(ctrl_socket, sizeof(ctrl_socket), "%s/ctrl", dir);
 	mkdir(argv[1], 0755);
 	mkdir(dir, 0755);
 	drop("up");
 	drop("joined");
 	drop("scanned");
 	drop("log");
+	drop("netfile");
+	drop("noremove");
+	drop("states");
+	drop("ctrl");
+	drop("nosock");
+	drop("dying");
 	put("nets", "0\tOtra\tany\t[DISABLED]\n");
 	put("air", AIR);
 	install("wpa_cli", FAKE_WPA_CLI);
@@ -546,9 +673,11 @@ int main(int argc, char **argv) {
 	check_scan_waits_for_results();
 	check_unpark();
 	check_off_on();
+	check_off_reads_the_socket();
 	check_scan_through_daemon();
 	check_connect();
 	check_bars();
+	check_forget();
 
 	printf("selftest: all Wi-Fi checks passed\n");
 	return 0;

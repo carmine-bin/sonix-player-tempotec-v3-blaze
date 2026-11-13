@@ -1434,9 +1434,15 @@ static void *wifi_worker(void *arg) {
 					g_serial++;
 				}
 				pthread_mutex_unlock(&lock);
+				// No sweep here. The two pages with a list ask for their own
+				// as soon as the radio is ready (wifisettings.c and
+				// setupwifi.c, both in poll_cb), and with neither open a sweep
+				// is airtime taken from the supplicant while it joins a saved
+				// network: on every screen-on after the idle park, at the edge
+				// of range, where the join is hardest. Stock does not scan on
+				// resume either (WIFI:ON at 0x482b80, no WIFI:SCAN after it).
 				if (job.arg_int) {
 					poll_status();
-					do_scan();
 				}
 				break;
 

@@ -308,8 +308,25 @@ static void check_power_on(void) {
 	assert(exists("up"));
 	// Networks an older build saved as disabled come back at power-on.
 	assert(line_at(read_log(), "enable_network all") >= 0);
+	usleep(500000);
+	assert(count_lines(read_log(), "scan") == 0); // no page open: nobody to show a list to
 	settle();
-	printf("selftest: power on waits for the supplicant\n");
+	printf("selftest: power on waits for the supplicant, and does not scan\n");
+}
+
+// The idle park and the screen-on after it: off, on, and no sweep.
+static void check_unpark(void) {
+	settle();
+	mark_log("park");
+	wifi_set_enabled_transient(false);
+	assert(wait_until(not_busy, 5000));
+	assert(!exists("up"));
+	wifi_set_enabled_transient(true);
+	assert(wait_until(not_busy, 5000));
+	assert(exists("up"));
+	usleep(500000);
+	assert(count_lines(log_since("park"), "scan") == 0);
+	printf("selftest: back from the idle park without a scan\n");
 }
 
 // A user with nothing saved: the table is empty until the sweep finishes.
@@ -414,6 +431,7 @@ int main(int argc, char **argv) {
 
 	check_power_on();
 	check_scan_waits_for_results();
+	check_unpark();
 	check_off_on();
 	check_connect();
 

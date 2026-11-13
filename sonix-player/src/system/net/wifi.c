@@ -99,9 +99,12 @@ void wifi_set_status_poll_slow(bool slow) { g_poll_slow = slow; }
 #define ASSOC_PARKED_MS 10000
 
 // Signal thresholds, in dBm, for the four glyphs (zero / low / high / max).
-#define RSSI_MAX_DBM (-55)
-#define RSSI_HIGH_DBM (-67)
-#define RSSI_LOW_DBM (-80)
+// The stock player's, from its one threshold function (hiby_player 0x481c40,
+// slti -90 / -70 / -60 after strtol), which draws both the status bar and the
+// list: below -90 none, -90 to -71 one, -70 to -61 two, -60 and up three.
+#define RSSI_MAX_DBM (-60)
+#define RSSI_HIGH_DBM (-70)
+#define RSSI_LOW_DBM (-90)
 
 // ---------------------------------------------------------------------------
 // state, shared between the worker and the interface thread

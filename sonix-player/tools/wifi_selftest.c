@@ -402,6 +402,50 @@ static void check_connect(void) {
 	printf("selftest: every join sets scan_ssid and priorities, and enables the rest after\n");
 }
 
+static int wanted_signal;
+static bool signal_is_wanted(void) {
+	wifi_status_t status;
+	wifi_get_status(&status);
+	return status.state == WIFI_STATE_CONNECTED && status.signal == wanted_signal;
+}
+
+// The bars, both in the list and on the status bar, as the stock player draws
+// them (hiby_player 0x481c40).
+static void check_bars(void) {
+	static const struct {
+		int dbm, bars;
+	} table[] = {{-30, 3}, {-60, 3}, {-61, 2}, {-70, 2}, {-71, 1}, {-90, 1}, {-91, 0}, {-100, 0}};
+	for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+		assert(bars_for(table[i].dbm) == table[i].bars);
+	}
+	assert(bars_for(0) == 0); // a saved network not on the air
+
+	// The status bar: the bars of the link, and three when there is no reading.
+	settle();
+	wifi_status_t status;
+	put("rssi", "-75\n");
+	wifi_connect("Casa", "password123");
+	assert(wait_for_op() == WIFI_OP_OK);
+	wanted_signal = -75;
+	assert(wait_until(signal_is_wanted, 4000)); // the poll period runs on the real clock
+	wifi_get_status(&status);
+	assert(status.bars == 1);
+	put("rssi", "-60\n");
+	wanted_signal = -60;
+	assert(wait_until(signal_is_wanted, 4000));
+	wifi_get_status(&status);
+	assert(status.bars == 3);
+
+	// The list: Casa at -58 dBm, Vecino at -85, one bar where -55/-67/-80 gave none.
+	wifi_scan_start();
+	assert(wait_until(not_scanning, 5000));
+	int casa = -1, vecino = -1;
+	count_networks("Casa", &casa);
+	count_networks("Vecino", &vecino);
+	assert(casa == 3 && vecino == 1);
+	printf("selftest: bars at -60 / -70 / -90, as stock\n");
+}
+
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		fprintf(stderr, "usage: %s WORKDIR\n", argv[0]);
@@ -434,6 +478,7 @@ int main(int argc, char **argv) {
 	check_unpark();
 	check_off_on();
 	check_connect();
+	check_bars();
 
 	printf("selftest: all Wi-Fi checks passed\n");
 	return 0;

@@ -30,7 +30,9 @@
 
 // Where sys_server leaves what it read out of wpa_supplicant. These are the
 // stock player's paths, taken from the daemon's own strings.
+#ifndef WIFI_RESULT_FILE // the self-check points it elsewhere
 #define WIFI_RESULT_FILE "/data/wifi_result.txt"
+#endif
 #define WIFI_STATUS_FILE "/data/wifi_status.txt"
 #define WIFI_NETWORK_FILE "/data/wifi_network.txt"
 
@@ -50,6 +52,10 @@
 // How many times a scan's results are read before an empty table is believed:
 // at SCAN_SETTLE_MS, then twice more half of it apart.
 #define SCAN_READS 3
+
+// Without wpa_cli: how long sys_server gets to run a second WIFI:SCAN and dump
+// the table before the file is read. Its queue thread idles a second at a time.
+#define SCAN_DAEMON_DUMP_MS 1300
 
 // The status poll while the radio is up. Two seconds is fast enough for the
 // status bar's bars to follow the room and cheap enough to ignore: one wpa_cli
@@ -776,13 +782,14 @@ static bool refresh_networks(bool keep_if_empty) {
 
 static void do_scan(void) {
 	char out[64];
+	char reply[128];
+	char command[64];
+	snprintf(command, sizeof(command), "WIFI:SCAN:%s", WIFI_IFACE);
 
 	// wpa_cli scan is answered by the supplicant itself. FAIL-BUSY means a scan
 	// is already running: its results are the ones read below.
-	if (wpa1("scan", out, sizeof(out)) != 0 && !out[0] && have_sysserver()) {
-		char reply[128];
-		char command[64];
-		snprintf(command, sizeof(command), "WIFI:SCAN:%s", WIFI_IFACE);
+	bool through_daemon = wpa1("scan", out, sizeof(out)) != 0 && !out[0] && have_sysserver();
+	if (through_daemon) {
 		sysserver_request(command, reply, sizeof(reply));
 	}
 
@@ -790,6 +797,14 @@ static void do_scan(void) {
 	// not an empty room: look again twice before saying there is nothing.
 	for (int tries = 0; tries < SCAN_READS; tries++) {
 		sleep_ms(tries ? SCAN_SETTLE_MS / 2 : SCAN_SETTLE_MS);
+		// Without wpa_cli the results come from the file sys_server writes,
+		// dumped when it runs a WIFI:SCAN, so before the sweep it asks for has
+		// finished. A second request after the first sweep had time to finish
+		// dumps that sweep (the old two-pass read, kept for this road only).
+		if (through_daemon && tries == 0) {
+			sysserver_request(command, reply, sizeof(reply));
+			sleep_ms(SCAN_DAEMON_DUMP_MS);
+		}
 		if (refresh_networks(tries + 1 < SCAN_READS)) {
 			break;
 		}

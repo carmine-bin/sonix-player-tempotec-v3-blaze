@@ -26,6 +26,8 @@ static int fake_nanosleep(const struct timespec *req, struct timespec *rem) {
 	return nanosleep(&scaled, rem);
 }
 static int fake_access(const char *path, int mode);
+static char result_file[600]; // sys_server's /data/wifi_result.txt
+#define WIFI_RESULT_FILE result_file
 #define nanosleep fake_nanosleep
 #define access fake_access
 #include "src/system/net/wifi.c"
@@ -103,6 +105,7 @@ static const char FAKE_WPA_CLI[] =
 	"#!/bin/sh\n"
 	"D=\"$WIFI_FAKE\"\n"
 	"shift 2\n"
+	"case \"$1\" in scan|scan_results) [ -e \"$D/noscan\" ] && { echo \"$* (refused)\" >> \"$D/log\"; exit 255; } ;; esac\n"
 	"if [ ! -e \"$D/up\" ]; then echo \"$* (no supplicant)\" >> \"$D/log\"; exit 255; fi\n"
 	"echo \"$*\" >> \"$D/log\"\n"
 	"case \"$1\" in\n"
@@ -163,6 +166,23 @@ static void ss_execute(const char *command) {
 	} else if (strncmp(command, "WIFI:OFF:", 9) == 0) {
 		drop("up");
 		drop("joined");
+	} else if (strncmp(command, "WIFI:SCAN:", 10) == 0) {
+		// The dump is taken when the sweep is asked for: it holds the last
+		// finished one, and this one finishes a little later.
+		char air[4096] = "";
+		if (exists("swept")) {
+			char p[600];
+			path_of(p, sizeof(p), "air");
+			FILE *f = fopen(p, "r");
+			size_t got = f ? fread(air, 1, sizeof(air) - 1, f) : 0;
+			air[got] = '\0';
+			if (f) {
+				fclose(f);
+			}
+		}
+		put("result", air);
+		usleep(200000);
+		put("swept", "");
 	}
 }
 
@@ -372,6 +392,22 @@ static wifi_op_t wait_for_op(void) {
 	return WIFI_OP_FAILED;
 }
 
+// Where wpa_cli cannot scan: sys_server's WIFI:SCAN and its result file, which
+// is one sweep behind, so the sweep is asked for twice.
+static void check_scan_through_daemon(void) {
+	settle();
+	put("noscan", "");
+	drop("swept");
+	put("result", "");
+	int scans_before = ss_scans;
+	wifi_scan_start();
+	assert(wait_until(not_scanning, 8000));
+	drop("noscan");
+	assert(ss_scans == scans_before + 2);
+	assert(count_networks(NULL, NULL) == 2);
+	printf("selftest: without wpa_cli the daemon's file is read a sweep later\n");
+}
+
 // Joining by name, new or saved, asks the supplicant to probe for it, ranks the
 // saved networks as the stock daemon does, and enables them all again once the
 // join is over, whether it worked or not.
@@ -461,6 +497,7 @@ int main(int argc, char **argv) {
 	}
 	setvbuf(stdout, NULL, _IONBF, 0);
 	snprintf(dir, sizeof(dir), "%s/wifi", argv[1]);
+	snprintf(result_file, sizeof(result_file), "%s/result", dir);
 	mkdir(argv[1], 0755);
 	mkdir(dir, 0755);
 	drop("up");
@@ -485,6 +522,7 @@ int main(int argc, char **argv) {
 	check_scan_waits_for_results();
 	check_unpark();
 	check_off_on();
+	check_scan_through_daemon();
 	check_connect();
 	check_bars();
 

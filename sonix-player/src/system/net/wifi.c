@@ -939,6 +939,15 @@ static direct_result_t connect_direct(const char *ssid, const char *psk) {
 		}
 	}
 
+	// Probe for this name directly instead of waiting for it in beacons and
+	// broadcast probe answers: that is what finds a hidden network, and the
+	// stock sys_server sets it on every join by name (0x405a74). Saved networks
+	// get it too, so the ones joined before this was set catch up.
+	wpa4("set_network", id_text, "scan_ssid", "1", out, sizeof(out));
+	if (!wpa_ok(out)) {
+		printf("wifi: scan_ssid not taken for network %s (%s)\n", id_text, out[0] ? out : "no reply");
+	}
+
 	wpa2("enable_network", id_text, out, sizeof(out));
 	wpa2("select_network", id_text, out, sizeof(out));
 	if (!wpa_ok(out)) {

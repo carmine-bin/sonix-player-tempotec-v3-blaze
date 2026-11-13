@@ -325,6 +325,37 @@ static void check_off_on(void) {
 	printf("selftest: off then on finds the networks\n");
 }
 
+static wifi_op_t wait_for_op(void) {
+	for (int waited = 0; waited < 8000; waited += 10) {
+		wifi_op_t op = wifi_take_op_result(NULL, 0);
+		if (op == WIFI_OP_OK || op == WIFI_OP_FAILED) {
+			return op;
+		}
+		usleep(10000);
+	}
+	assert(!"no result from the join");
+	return WIFI_OP_FAILED;
+}
+
+// Joining by name, new or saved, asks the supplicant to probe for it.
+static void check_connect(void) {
+	settle();
+	mark_log("join new");
+	wifi_connect("Casa", "password123");
+	assert(wait_for_op() == WIFI_OP_OK);
+	const char *log = log_since("join new");
+	assert(count_lines(log, "add_network") == 1);
+	assert(count_lines(log, "set_network 1 scan_ssid 1") == 1);
+
+	mark_log("join saved");
+	wifi_connect("Otra", NULL);
+	assert(wait_for_op() == WIFI_OP_OK);
+	log = log_since("join saved");
+	assert(count_lines(log, "add_network") == 0);
+	assert(count_lines(log, "set_network 0 scan_ssid 1") == 1);
+	printf("selftest: every join sets scan_ssid\n");
+}
+
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		fprintf(stderr, "usage: %s WORKDIR\n", argv[0]);
@@ -338,7 +369,7 @@ int main(int argc, char **argv) {
 	drop("joined");
 	drop("scanned");
 	drop("log");
-	put("nets", "");
+	put("nets", "0\tOtra\tany\t[DISABLED]\n");
 	put("air", AIR);
 	install("wpa_cli", FAKE_WPA_CLI);
 	install("udhcpc", FAKE_UDHCPC);
@@ -355,6 +386,7 @@ int main(int argc, char **argv) {
 	check_power_on();
 	check_scan_waits_for_results();
 	check_off_on();
+	check_connect();
 
 	printf("selftest: all Wi-Fi checks passed\n");
 	return 0;

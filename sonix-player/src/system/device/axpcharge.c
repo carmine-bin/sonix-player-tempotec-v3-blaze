@@ -200,7 +200,9 @@ static bool set_field(uint8_t reg, uint8_t mask, uint8_t target) {
 //     hold, the last request is back there some 5-6 s after a cable goes in;
 //   * its axp_battery/charger switch zeroes REG62h and nothing else, so the
 //     thread undoes it at the next plug. The stop here is therefore a charge
-//     current of 0, stock's own way, which the thread then keeps.
+//     current of 0, which the thread then keeps. Not quite stock's stop:
+//     its (10, 100, 0) also takes the input to 100 mA and clears the REG18h
+//     bit, so the battery carries the player; here the cable still does.
 //
 // Where this differs from stock, on purpose:
 //
@@ -231,6 +233,19 @@ static bool set_field(uint8_t reg, uint8_t mask, uint8_t target) {
 // parked gadget at its next poll (four seconds at most, in standby).
 #define CABLE_LOOK_MS 1000
 #define WALL_SETTLE_MS 6000
+
+// The way back from a wrong guess. Something taken for a wall charger that is
+// not one -- a PC asleep before the plug, a charge-only cable, a hub with no
+// upstream -- shows it in one of two ways once asked for 2000 mA: VBUS sags
+// and the PMIC's input regulation holds it up (REG01h bit 3, VINDPM, on at
+// three of the last five looks), or the port's own protection cuts VBUS
+// within seconds. Either way the cable goes back to 500 mA in for as long as
+// it stays, and a cable back within TRIP_REPLUG_MS of such a cut is not raised
+// again: the port would only trip once more, every few seconds.
+#define AXP_STATUS_VINDPM 0x08u
+#define VINDPM_LOOKS 3	   // of the last five
+#define TRIP_WITHIN_MS 3000 // VBUS gone this soon after the raise: a trip
+#define TRIP_REPLUG_MS 15000
 
 typedef enum { CABLE_NONE, CABLE_UNKNOWN, CABLE_HOST, CABLE_WALL } cable_t;
 
@@ -266,6 +281,11 @@ static cable_t cable = CABLE_NONE;
 static long long next_look_ms;
 static long long quiet_since; // since when the line has looked like a wall charger, 0 = it has not
 static bool host_seen;		  // a host has talked on this cable: it stays a host until it is pulled
+static bool wall_refused;	  // this cable could not take 2000 mA: never a wall charger until it is pulled
+static bool vbus_seen;		  // VBUS at the last look
+static long long wall_since_ms; // when the cable was last taken for a wall charger
+static long long tripped_ms;	  // when VBUS went away soon after a raise, 0 = it has not
+static unsigned vindpm_looks;	  // the last five looks at a wall charger, a bit each
 static char udc_state[32];	  // as last read, for the log
 static policy_t written = {-1, -1};
 static uint8_t logged_input = 0xff, logged_current = 0xff;
@@ -368,10 +388,25 @@ static bool line_quiet(const char *state) {
 
 static cable_t look_at_cable(long long now) {
 	if (!usb_vbus_present()) {
+		if (vbus_seen && cable == CABLE_WALL && now - wall_since_ms < TRIP_WITHIN_MS) {
+			tripped_ms = now;
+			printf("axpcharge: VBUS went away %lld ms after the raise to 2000 mA: the next cable within %d s "
+				   "stays at 500 mA\n",
+				   now - wall_since_ms, TRIP_REPLUG_MS / 1000);
+		}
+		vbus_seen = false;
 		quiet_since = 0;
 		host_seen = false;
 		snprintf(udc_state, sizeof(udc_state), "-");
 		return CABLE_NONE;
+	}
+	if (!vbus_seen) {
+		// A new cable: what was learnt about the last one goes, unless it
+		// tripped the port just now.
+		vbus_seen = true;
+		wall_refused = tripped_ms && now - tripped_ms < TRIP_REPLUG_MS;
+		tripped_ms = 0;
+		vindpm_looks = 0;
 	}
 	if (!read_udc_state(udc_state, sizeof(udc_state))) {
 		snprintf(udc_state, sizeof(udc_state), "?");
@@ -395,6 +430,22 @@ static cable_t look_at_cable(long long now) {
 		quiet_since = 0;
 		return CABLE_UNKNOWN;
 	}
+	if (wall_refused) {
+		return CABLE_UNKNOWN;
+	}
+	if (cable == CABLE_WALL) {
+		uint8_t status = 0;
+		bool sag = axp_read(AXP_REG_STATUS, &status) && (status & AXP_STATUS_VINDPM);
+		vindpm_looks = ((vindpm_looks << 1) | (sag ? 1u : 0u)) & 0x1fu;
+		if (__builtin_popcount(vindpm_looks) >= VINDPM_LOOKS) {
+			printf("axpcharge: VBUS sags at 2000 mA (VINDPM, REG01h=0x%02x): back to 500 mA for this cable\n",
+				   status);
+			wall_refused = true;
+			quiet_since = 0;
+			return CABLE_UNKNOWN;
+		}
+		return CABLE_WALL;
+	}
 	if (!quiet_since) {
 		quiet_since = now;
 	}
@@ -409,6 +460,10 @@ static bool look(long long now) {
 		return false;
 	}
 	printf("axpcharge: cable: %s (UDC '%s')\n", CABLE_NAMES[seen], udc_state);
+	if (seen == CABLE_WALL) {
+		wall_since_ms = now;
+		vindpm_looks = 0;
+	}
 	if (cable == CABLE_NONE) {
 		// A new plug: everything is written again, whatever the driver kept.
 		written.input = written.charge = -1;
@@ -444,8 +499,9 @@ static policy_t policy_now(void) {
 	if (want_current && want.charge > CHARGE_MA_SWITCH) {
 		want.charge = CHARGE_MA_SWITCH;
 	}
-	// The stop, the way stock's (10, 100, 0) stops it: a charge current of 0,
-	// which the driver writes to REG62h at once and its thread keeps there.
+	// The stop: a charge current of 0, which the driver writes to REG62h at
+	// once and its thread keeps there. The input stays, so the cable, not the
+	// battery, carries the player meanwhile.
 	if (stop_reason()) {
 		want.charge = 0;
 	}
@@ -652,12 +708,17 @@ static void log_first_contact(void) {
 	}
 	done = true;
 	uint8_t volt, cur, in;
-	if (!axp_read(AXP_REG_VOLTAGE, &volt) || !axp_read(AXP_REG_CURRENT, &cur) || !axp_read(AXP_REG_INPUT, &in)) {
+	if (!axp_read(AXP_REG_VOLTAGE, &volt) || !axp_read(AXP_REG_CURRENT, &cur)) {
 		printf("axpcharge: the PMIC does not answer on %s at 0x%02x\n", AXP_BUS, AXP_ADDR);
 		return;
 	}
-	printf("axpcharge: found REG64h=0x%02x, REG62h=0x%02x (%d mA), REG16h=0x%02x (%d mA in)\n", volt, cur,
-		   current_ma(cur & AXP_CURRENT_MASK), in, INPUT_STEP_MA[in & AXP_INPUT_MASK]);
+	if (axp_read(AXP_REG_INPUT, &in)) {
+		printf("axpcharge: found REG64h=0x%02x, REG62h=0x%02x (%d mA), REG16h=0x%02x (%d mA in)\n", volt, cur,
+			   current_ma(cur & AXP_CURRENT_MASK), in, INPUT_STEP_MA[in & AXP_INPUT_MASK]);
+	} else {
+		printf("axpcharge: found REG64h=0x%02x, REG62h=0x%02x (%d mA)\n", volt, cur,
+			   current_ma(cur & AXP_CURRENT_MASK));
+	}
 	// Why this boot started and why the last one ended, for reports of the
 	// player switching itself off (REG21h seen: 0x01 long press, 0x02 software).
 	uint8_t on_src, off_src;

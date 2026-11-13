@@ -30,7 +30,9 @@
 
 // Where sys_server leaves what it read out of wpa_supplicant. These are the
 // stock player's paths, taken from the daemon's own strings.
+#ifndef WIFI_RESULT_FILE // the self-check points it elsewhere
 #define WIFI_RESULT_FILE "/data/wifi_result.txt"
+#endif
 #define WIFI_STATUS_FILE "/data/wifi_status.txt"
 #define WIFI_NETWORK_FILE "/data/wifi_network.txt"
 
@@ -50,6 +52,10 @@
 // How many times a scan's results are read before an empty table is believed:
 // at SCAN_SETTLE_MS, then twice more half of it apart.
 #define SCAN_READS 3
+
+// Without wpa_cli: how long sys_server gets to run a second WIFI:SCAN and dump
+// the table before the file is read. Its queue thread idles a second at a time.
+#define SCAN_DAEMON_DUMP_MS 1300
 
 // The status poll while the radio is up. Two seconds is fast enough for the
 // status bar's bars to follow the room and cheap enough to ignore: one wpa_cli
@@ -776,13 +782,14 @@ static bool refresh_networks(bool keep_if_empty) {
 
 static void do_scan(void) {
 	char out[64];
+	char reply[128];
+	char command[64];
+	snprintf(command, sizeof(command), "WIFI:SCAN:%s", WIFI_IFACE);
 
 	// wpa_cli scan is answered by the supplicant itself. FAIL-BUSY means a scan
 	// is already running: its results are the ones read below.
-	if (wpa1("scan", out, sizeof(out)) != 0 && !out[0] && have_sysserver()) {
-		char reply[128];
-		char command[64];
-		snprintf(command, sizeof(command), "WIFI:SCAN:%s", WIFI_IFACE);
+	bool through_daemon = wpa1("scan", out, sizeof(out)) != 0 && !out[0] && have_sysserver();
+	if (through_daemon) {
 		sysserver_request(command, reply, sizeof(reply));
 	}
 
@@ -790,6 +797,14 @@ static void do_scan(void) {
 	// not an empty room: look again twice before saying there is nothing.
 	for (int tries = 0; tries < SCAN_READS; tries++) {
 		sleep_ms(tries ? SCAN_SETTLE_MS / 2 : SCAN_SETTLE_MS);
+		// Without wpa_cli the results come from the file sys_server writes,
+		// dumped when it runs a WIFI:SCAN, so before the sweep it asks for has
+		// finished. A second request after the first sweep had time to finish
+		// dumps that sweep (the old two-pass read, kept for this road only).
+		if (through_daemon && tries == 0) {
+			sysserver_request(command, reply, sizeof(reply));
+			sleep_ms(SCAN_DAEMON_DUMP_MS);
+		}
 		if (refresh_networks(tries + 1 < SCAN_READS)) {
 			break;
 		}
@@ -877,8 +892,10 @@ static bool psk_is_usable(const char *psk) {
 // with it, which is what a wrong passphrase looks like from the outside: the
 // supplicant tries, the access point rejects the handshake, and after a few
 // goes the network is flagged TEMP-DISABLED in list_networks. There is no field
-// in `status` that says it.
-static bool network_rejected(const char *ssid) {
+// in `status` that says it. `id` picks the entry when it is known (-1: by
+// name), since a re-entered passphrase is tried under a second entry with the
+// same name.
+static bool network_rejected(const char *ssid, int id) {
 	static char buf[4096];
 	if (wpa1("list_networks", buf, sizeof(buf)) != 0) {
 		return false;
@@ -902,7 +919,7 @@ static bool network_rejected(const char *ssid) {
 			continue;
 		}
 		ssid_unescape(fields[1]);
-		if (strcmp(fields[1], ssid) == 0) {
+		if (id >= 0 ? atoi(fields[0]) == id : strcmp(fields[1], ssid) == 0) {
 			// TEMP-DISABLED only. A plain [DISABLED] is every network that is
 			// not the selected one, which says nothing about passphrases.
 			return strstr(fields[3], "TEMP-DISABLED") != NULL;
@@ -940,13 +957,24 @@ typedef enum {
 	DIRECT_UNAVAILABLE, // wpa_cli did not run
 } direct_result_t;
 
-// `*id_out` is the network joined, `*added` whether this join created it.
-static direct_result_t connect_direct(const char *ssid, const char *psk, int *id_out, bool *added) {
+// `*id_out` is the network joined, `*added` whether this join created it, and
+// `*replaces` the saved entry it stands in for (-1: none).
+//
+// A passphrase re-entered for a saved network goes into a new entry rather
+// than over the saved one: if it is wrong, the new entry is removed and the
+// saved passphrase is still there, in memory and on disk. do_connect() removes
+// the old entry once the new one has joined.
+static direct_result_t connect_direct(const char *ssid, const char *psk, int *id_out, bool *added,
+									  int *replaces) {
 	char out[256];
 	char id_text[16];
 	char quoted_value[2 * WIFI_SSID_MAX + 3];
 
 	int id = saved_network_id(ssid);
+	if (id >= 0 && psk && psk[0]) {
+		*replaces = id;
+		id = -1;
+	}
 	if (id < 0) {
 		int rc = wpa1("add_network", out, sizeof(out));
 		if (rc != 0 && !out[0]) {
@@ -962,6 +990,7 @@ static direct_result_t connect_direct(const char *ssid, const char *psk, int *id
 			return DIRECT_REFUSED;
 		}
 		*added = true;
+		*id_out = id;
 		snprintf(id_text, sizeof(id_text), "%d", id);
 
 		quoted(ssid, quoted_value, sizeof(quoted_value));
@@ -980,17 +1009,10 @@ static direct_result_t connect_direct(const char *ssid, const char *psk, int *id
 			wpa4("set_network", id_text, "key_mgmt", "NONE", out, sizeof(out));
 		}
 	} else {
+		// A saved network, joined with what it already has. (A new entry also
+		// takes care of one first joined as open, whose key_mgmt=NONE would
+		// have ignored a passphrase written over it.)
 		snprintf(id_text, sizeof(id_text), "%d", id);
-		// A saved network whose password is being re-entered. key_mgmt goes
-		// with it: a network first joined as an open one carries key_mgmt=NONE,
-		// and a passphrase set over the top of that is never used.
-		if (psk && psk[0]) {
-			if (!set_psk(id_text, psk)) {
-				set_fail(WIFI_FAIL_WRONG_KEY);
-				return DIRECT_REFUSED;
-			}
-			wpa4("set_network", id_text, "key_mgmt", "WPA-PSK", out, sizeof(out));
-		}
 	}
 
 	// Probe for this name directly instead of waiting for it in beacons and
@@ -1098,6 +1120,15 @@ static bool text_is_shell_safe(const char *text) {
 	return text[0] && strpbrk(text, ":;&|<>()$`\\\"'*?[]#~!\n\t") == NULL;
 }
 
+// Drops an entry from wpa_supplicant's memory; the file changes only at the
+// next save_config.
+static void forget_network_id(int id) {
+	char id_text[16];
+	char out[64];
+	snprintf(id_text, sizeof(id_text), "%d", id);
+	wpa2("remove_network", id_text, out, sizeof(out));
+}
+
 static void do_connect(const char *ssid, const char *psk) {
 	bool sent = false;
 	bool has_psk = psk && psk[0];
@@ -1133,8 +1164,12 @@ static void do_connect(const char *ssid, const char *psk) {
 	// to wpa_cli through execv, with no shell anywhere and the quoting done
 	// here, so a name with a #, a space or an accent survives it.
 	int joined_id = -1;
+	int replaces = -1;
 	bool added = false;
-	direct_result_t direct = connect_direct(ssid, psk, &joined_id, &added);
+	direct_result_t direct = connect_direct(ssid, psk, &joined_id, &added, &replaces);
+	if (direct == DIRECT_REFUSED && added) {
+		forget_network_id(joined_id); // half set up: never let a later save write it
+	}
 	sent = direct == DIRECT_OK;
 
 	if (direct == DIRECT_UNAVAILABLE && have_sysserver()) {
@@ -1189,7 +1224,7 @@ static void do_connect(const char *ssid, const char *psk) {
 		// matched and the radio answered. The second is what catches the case
 		// where the supplicant is still retrying when the wait runs out and has
 		// not given up on the network yet.
-		set_fail(has_psk && (handshake || network_rejected(ssid)) ? WIFI_FAIL_WRONG_KEY : WIFI_FAIL_OTHER);
+		set_fail(has_psk && (handshake || network_rejected(ssid, joined_id)) ? WIFI_FAIL_WRONG_KEY : WIFI_FAIL_OTHER);
 		printf("wifi: \"%s\" did not join (%s)\n", ssid,
 			   wifi_last_failure() == WIFI_FAIL_WRONG_KEY ? "wrong passphrase" : "no answer");
 	}
@@ -1203,14 +1238,14 @@ static void do_connect(const char *ssid, const char *psk) {
 	// save cannot write it down with a wrong passphrase.
 	if (direct == DIRECT_OK) {
 		if (associated) {
+			if (replaces >= 0) {
+				forget_network_id(replaces); // the old passphrase, now replaced
+			}
 			set_priorities(joined_id);
 			enable_all_networks(true);
 		} else {
 			if (added) {
-				char id_text[16];
-				char out[64];
-				snprintf(id_text, sizeof(id_text), "%d", joined_id);
-				wpa2("remove_network", id_text, out, sizeof(out));
+				forget_network_id(joined_id);
 			}
 			enable_all_networks(false);
 		}

@@ -26,6 +26,8 @@ static int fake_nanosleep(const struct timespec *req, struct timespec *rem) {
 	return nanosleep(&scaled, rem);
 }
 static int fake_access(const char *path, int mode);
+static char result_file[600]; // sys_server's /data/wifi_result.txt
+#define WIFI_RESULT_FILE result_file
 #define nanosleep fake_nanosleep
 #define access fake_access
 #include "src/system/net/wifi.c"
@@ -103,6 +105,7 @@ static const char FAKE_WPA_CLI[] =
 	"#!/bin/sh\n"
 	"D=\"$WIFI_FAKE\"\n"
 	"shift 2\n"
+	"case \"$1\" in scan|scan_results) [ -e \"$D/noscan\" ] && { echo \"$* (refused)\" >> \"$D/log\"; exit 255; } ;; esac\n"
 	"if [ ! -e \"$D/up\" ]; then echo \"$* (no supplicant)\" >> \"$D/log\"; exit 255; fi\n"
 	"echo \"$*\" >> \"$D/log\"\n"
 	"case \"$1\" in\n"
@@ -119,17 +122,21 @@ static const char FAKE_WPA_CLI[] =
 	"    if [ \"$n\" -gt 0 ]; then echo $((n - 1)) > \"$D/pending\"; else cat \"$D/air\"; fi\n"
 	"  fi ;;\n"
 	"list_networks) echo 'network id / ssid / bssid / flags'; cat \"$D/nets\" 2>/dev/null ;;\n"
-	"add_network) n=$(wc -l < \"$D/nets\"); printf '%s\\t\\tany\\t[DISABLED]\\n' $n >> \"$D/nets\"; echo $n ;;\n"
+	"add_network) n=$(awk -F '\\t' 'BEGIN { m = -1 } $1 + 0 > m { m = $1 + 0 } END { print m + 1 }' \"$D/nets\"); printf '%s\\t\\tany\\t[DISABLED]\\n' $n >> \"$D/nets\"; echo $n ;;\n"
 	"set_network)\n"
 	"  if [ \"$3\" = ssid ]; then\n"
 	"    name=$(echo \"$4\" | sed 's/^\"//; s/\"$//')\n"
 	"    awk -F '\\t' -v OFS='\\t' -v id=\"$2\" -v name=\"$name\" '$1 == id { $2 = name } { print }' \"$D/nets\" > \"$D/nets.new\"\n"
 	"    mv \"$D/nets.new\" \"$D/nets\"\n"
 	"  fi\n"
+	"  if [ \"$3\" = psk ]; then echo \"$4\" > \"$D/psk.$2\"; fi\n"
 	"  echo OK ;;\n"
+	"remove_network)\n"
+	"  awk -F '\\t' -v id=\"$2\" '$1 != id' \"$D/nets\" > \"$D/nets.new\"; mv \"$D/nets.new\" \"$D/nets\"; echo OK ;;\n"
 	"select_network)\n"
 	"  name=$(awk -F '\\t' -v id=\"$2\" '$1 == id { printf \"%s\", $2 }' \"$D/nets\")\n"
-	"  if awk -F '\\t' -v n=\"$name\" '$5 == n { f = 1 } END { exit !f }' \"$D/air\"; then\n"
+	"  if awk -F '\\t' -v n=\"$name\" '$5 == n { f = 1 } END { exit !f }' \"$D/air\" &&\n"
+	"     ! grep -qx '\"wrongpass1\"' \"$D/psk.$2\" 2>/dev/null; then\n"
 	"    printf '%s' \"$name\" > \"$D/joined\"\n"
 	"  else rm -f \"$D/joined\"; fi\n"
 	"  echo OK ;;\n"
@@ -163,6 +170,23 @@ static void ss_execute(const char *command) {
 	} else if (strncmp(command, "WIFI:OFF:", 9) == 0) {
 		drop("up");
 		drop("joined");
+	} else if (strncmp(command, "WIFI:SCAN:", 10) == 0) {
+		// The dump is taken when the sweep is asked for: it holds the last
+		// finished one, and this one finishes a little later.
+		char air[4096] = "";
+		if (exists("swept")) {
+			char p[600];
+			path_of(p, sizeof(p), "air");
+			FILE *f = fopen(p, "r");
+			size_t got = f ? fread(air, 1, sizeof(air) - 1, f) : 0;
+			air[got] = '\0';
+			if (f) {
+				fclose(f);
+			}
+		}
+		put("result", air);
+		usleep(200000);
+		put("swept", "");
 	}
 }
 
@@ -372,6 +396,22 @@ static wifi_op_t wait_for_op(void) {
 	return WIFI_OP_FAILED;
 }
 
+// Where wpa_cli cannot scan: sys_server's WIFI:SCAN and its result file, which
+// is one sweep behind, so the sweep is asked for twice.
+static void check_scan_through_daemon(void) {
+	settle();
+	put("noscan", "");
+	drop("swept");
+	put("result", "");
+	int scans_before = ss_scans;
+	wifi_scan_start();
+	assert(wait_until(not_scanning, 8000));
+	drop("noscan");
+	assert(ss_scans == scans_before + 2);
+	assert(count_networks(NULL, NULL) == 2);
+	printf("selftest: without wpa_cli the daemon's file is read a sweep later\n");
+}
+
 // Joining by name, new or saved, asks the supplicant to probe for it, ranks the
 // saved networks as the stock daemon does, and enables them all again once the
 // join is over, whether it worked or not.
@@ -407,6 +447,26 @@ static void check_connect(void) {
 	assert(wait_for_op() == WIFI_OP_FAILED);
 	log = log_since("join far");
 	assert(count_lines(log, "remove_network 2") == 1 && count_lines(log, "save_config") == 0);
+
+	// A wrong passphrase re-entered for a saved network goes into a new entry,
+	// which is dropped; the saved one is never written over.
+	mark_log("wrong again");
+	wifi_connect("Casa", "wrongpass1");
+	assert(wait_for_op() == WIFI_OP_FAILED);
+	log = log_since("wrong again");
+	assert(count_lines(log, "set_network 1 psk \"wrongpass1\"") == 0);
+	assert(count_lines(log, "set_network 2 psk \"wrongpass1\"") == 1);
+	assert(count_lines(log, "remove_network 2") == 1 && count_lines(log, "save_config") == 0);
+
+	// The right one replaces the saved entry once it has joined.
+	mark_log("right again");
+	wifi_connect("Casa", "newpass123");
+	assert(wait_for_op() == WIFI_OP_OK);
+	log = log_since("right again");
+	int removed = line_at(log, "remove_network 1");
+	assert(line_at(log, "select_network 2") >= 0 && removed > line_at(log, "select_network 2"));
+	assert(line_at(log, "save_config") > removed);
+	assert(saved_network_id("Casa") == 2);
 	printf("selftest: every join sets scan_ssid and priorities, and enables the rest after\n");
 }
 
@@ -461,6 +521,7 @@ int main(int argc, char **argv) {
 	}
 	setvbuf(stdout, NULL, _IONBF, 0);
 	snprintf(dir, sizeof(dir), "%s/wifi", argv[1]);
+	snprintf(result_file, sizeof(result_file), "%s/result", dir);
 	mkdir(argv[1], 0755);
 	mkdir(dir, 0755);
 	drop("up");
@@ -485,6 +546,7 @@ int main(int argc, char **argv) {
 	check_scan_waits_for_results();
 	check_unpark();
 	check_off_on();
+	check_scan_through_daemon();
 	check_connect();
 	check_bars();
 

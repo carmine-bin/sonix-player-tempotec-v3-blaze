@@ -387,8 +387,8 @@ static void check_connect(void) {
 	int high = line_at(log, "set_network 1 priority 2");
 	int select = line_at(log, "select_network 1");
 	int all = line_at(log, "enable_network all");
-	assert(low >= 0 && high >= 0 && low < select && high < select);
-	assert(all > select && line_at(log + all, "save_config") > 0);
+	assert(low > select && high > select && all > high); // after the join worked
+	assert(line_at(log, "save_config") > all);
 
 	// Out of range: the join fails, and the others come back all the same.
 	mark_log("join saved");
@@ -397,8 +397,16 @@ static void check_connect(void) {
 	log = log_since("join saved");
 	assert(count_lines(log, "add_network") == 0);
 	assert(count_lines(log, "set_network 0 scan_ssid 1") == 1);
-	assert(line_at(log, "set_network 0 priority 2") >= 0 && line_at(log, "set_network 1 priority 1") >= 0);
+	assert(count_lines(log, "set_network 0 priority 2") == 0); // a failed join is not ranked
+	assert(count_lines(log, "save_config") == 0);			   // nor saved
 	assert(line_at(log, "enable_network all") > line_at(log, "select_network 0"));
+
+	// A new network that fails is taken out again.
+	mark_log("join far");
+	wifi_connect("Lejana", "password123");
+	assert(wait_for_op() == WIFI_OP_FAILED);
+	log = log_since("join far");
+	assert(count_lines(log, "remove_network 2") == 1 && count_lines(log, "save_config") == 0);
 	printf("selftest: every join sets scan_ssid and priorities, and enables the rest after\n");
 }
 

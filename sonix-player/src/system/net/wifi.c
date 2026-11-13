@@ -940,7 +940,8 @@ typedef enum {
 	DIRECT_UNAVAILABLE, // wpa_cli did not run
 } direct_result_t;
 
-static direct_result_t connect_direct(const char *ssid, const char *psk) {
+// `*id_out` is the network joined, `*added` whether this join created it.
+static direct_result_t connect_direct(const char *ssid, const char *psk, int *id_out, bool *added) {
 	char out[256];
 	char id_text[16];
 	char quoted_value[2 * WIFI_SSID_MAX + 3];
@@ -960,6 +961,7 @@ static direct_result_t connect_direct(const char *ssid, const char *psk) {
 		if (id < 0) {
 			return DIRECT_REFUSED;
 		}
+		*added = true;
 		snprintf(id_text, sizeof(id_text), "%d", id);
 
 		quoted(ssid, quoted_value, sizeof(quoted_value));
@@ -999,7 +1001,7 @@ static direct_result_t connect_direct(const char *ssid, const char *psk) {
 	if (!wpa_ok(out)) {
 		printf("wifi: scan_ssid not taken for network %s (%s)\n", id_text, out[0] ? out : "no reply");
 	}
-	set_priorities(id);
+	*id_out = id;
 
 	wpa2("enable_network", id_text, out, sizeof(out));
 	wpa2("select_network", id_text, out, sizeof(out));
@@ -1007,7 +1009,8 @@ static direct_result_t connect_direct(const char *ssid, const char *psk) {
 		printf("wifi: select_network %s failed (%s)\n", id_text, out[0] ? out : "no reply");
 		return DIRECT_REFUSED;
 	}
-	wpa1("save_config", out, sizeof(out));
+	// Nothing is saved yet: do_connect() saves once the join has worked, so a
+	// wrong passphrase or a network out of range never reaches the file.
 	printf("wifi: joining \"%s\" through wpa_cli, network %s\n", ssid, id_text);
 	return DIRECT_OK;
 }
@@ -1129,7 +1132,9 @@ static void do_connect(const char *ssid, const char *psk) {
 	// answers OK to a command it has already mangled. The direct route speaks
 	// to wpa_cli through execv, with no shell anywhere and the quoting done
 	// here, so a name with a #, a space or an accent survives it.
-	direct_result_t direct = connect_direct(ssid, psk);
+	int joined_id = -1;
+	bool added = false;
+	direct_result_t direct = connect_direct(ssid, psk, &joined_id, &added);
 	sent = direct == DIRECT_OK;
 
 	if (direct == DIRECT_UNAVAILABLE && have_sysserver()) {
@@ -1192,8 +1197,23 @@ static void do_connect(const char *ssid, const char *psk) {
 	// wpa_supplicant could settle on one of them while the page waits for this
 	// one. After a failed join it is what lets the radio go back to a network
 	// that works. sys_server's own join already ends with this.
+	// Priorities and the save only after a join that worked: a failed one on
+	// disk at priority 2 would be tried first at every supplicant start. A
+	// network this join added and that failed is removed again, so a later
+	// save cannot write it down with a wrong passphrase.
 	if (direct == DIRECT_OK) {
-		enable_all_networks(true);
+		if (associated) {
+			set_priorities(joined_id);
+			enable_all_networks(true);
+		} else {
+			if (added) {
+				char id_text[16];
+				char out[64];
+				snprintf(id_text, sizeof(id_text), "%d", joined_id);
+				wpa2("remove_network", id_text, out, sizeof(out));
+			}
+			enable_all_networks(false);
+		}
 	}
 	set_op(associated ? WIFI_OP_OK : WIFI_OP_FAILED, ssid);
 	refresh_networks(false);

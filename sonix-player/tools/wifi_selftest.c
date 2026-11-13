@@ -28,8 +28,10 @@ static int fake_nanosleep(const struct timespec *req, struct timespec *rem) {
 static int fake_access(const char *path, int mode);
 static char result_file[600];  // sys_server's /data/wifi_result.txt
 static char network_file[600]; // and its /data/wifi_network.txt
+static char ctrl_socket[600];  // /var/run/wpa_supplicant/wlan0
 #define WIFI_RESULT_FILE result_file
 #define WIFI_NETWORK_FILE network_file
+#define WPA_CTRL_SOCKET ctrl_socket
 #define nanosleep fake_nanosleep
 #define access fake_access
 #include "src/system/net/wifi.c"
@@ -107,6 +109,7 @@ static const char FAKE_WPA_CLI[] =
 	"#!/bin/sh\n"
 	"D=\"$WIFI_FAKE\"\n"
 	"shift 2\n"
+	"if [ -e \"$D/dying\" ]; then echo \"$* (dying)\" >> \"$D/log\"; sleep 2; exit 255; fi\n"
 	"case \"$1\" in scan|scan_results) [ -e \"$D/noscan\" ] && { echo \"$* (refused)\" >> \"$D/log\"; exit 255; } ;; esac\n"
 	"if [ ! -e \"$D/up\" ]; then echo \"$* (no supplicant)\" >> \"$D/log\"; exit 255; fi\n"
 	"echo \"$*\" >> \"$D/log\"\n"
@@ -179,10 +182,20 @@ static void ss_execute(const char *command) {
 		usleep(150000); // wifi_on.sh: killall, ifconfig, wpa_supplicant -B ...
 		drop("scanned");
 		put("up", "");
+		if (!exists("nosock")) {
+			put("ctrl", "");
+		}
 	} else if (strncmp(command, "WIFI:OFF:", 9) == 0) {
+		// wifi_off.sh's killall: the supplicant takes a moment to go, and a
+		// request sent to it meanwhile goes unanswered (2 s here, 10 s on the
+		// device). The socket goes last.
+		put("dying", "");
+		usleep(300000);
 		drop("up");
 		drop("joined");
 		drop("states");
+		drop("ctrl");
+		drop("dying");
 	} else if (strncmp(command, "WIFI:SCAN:", 10) == 0) {
 		// The dump is taken when the sweep is asked for: it holds the last
 		// finished one, and this one finishes a little later.
@@ -536,6 +549,36 @@ static void check_bars(void) {
 	printf("selftest: bars at -60 / -70 / -90, as stock\n");
 }
 
+// Off is read off the control socket, so the wait never asks the supplicant
+// that is going away; with no socket where it is expected, it asks after all.
+static void check_off_reads_the_socket(void) {
+	settle();
+	mark_log("off");
+	uint32_t asked = now_ms();
+	wifi_set_enabled(false);
+	assert(wait_until(not_busy, 5000));
+	assert(now_ms() - asked < 1500); // a dying status would take 2 s
+	assert(!exists("up"));
+	assert(count_lines(log_since("off"), "status (dying)") == 0);
+
+	put("nosock", "");
+	wifi_set_enabled(true);
+	assert(wait_until(not_busy, 5000));
+	assert(exists("up") && !exists("ctrl"));
+	mark_log("off asked");
+	wifi_set_enabled(false);
+	assert(wait_until(not_busy, 8000));
+	assert(!exists("up"));
+	const char *log = log_since("off asked");
+	assert(line_at(log, "status") >= 0 || line_at(log, "status (no supplicant)") >= 0 ||
+		   line_at(log, "status (dying)") >= 0);
+	drop("nosock");
+	wifi_set_enabled(true);
+	assert(wait_until(not_busy, 5000));
+	assert(exists("up") && exists("ctrl"));
+	printf("selftest: off waits on the control socket, and asks only without one\n");
+}
+
 static bool listed_as_saved(const char *ssid) {
 	wifi_network_t nets[WIFI_MAX_NETWORKS];
 	int n = wifi_get_networks(nets, WIFI_MAX_NETWORKS);
@@ -599,6 +642,7 @@ int main(int argc, char **argv) {
 	snprintf(dir, sizeof(dir), "%s/wifi", argv[1]);
 	snprintf(result_file, sizeof(result_file), "%s/result", dir);
 	snprintf(network_file, sizeof(network_file), "%s/netfile", dir);
+	snprintf(ctrl_socket, sizeof(ctrl_socket), "%s/ctrl", dir);
 	mkdir(argv[1], 0755);
 	mkdir(dir, 0755);
 	drop("up");
@@ -608,6 +652,9 @@ int main(int argc, char **argv) {
 	drop("netfile");
 	drop("noremove");
 	drop("states");
+	drop("ctrl");
+	drop("nosock");
+	drop("dying");
 	put("nets", "0\tOtra\tany\t[DISABLED]\n");
 	put("air", AIR);
 	install("wpa_cli", FAKE_WPA_CLI);
@@ -626,6 +673,7 @@ int main(int argc, char **argv) {
 	check_scan_waits_for_results();
 	check_unpark();
 	check_off_on();
+	check_off_reads_the_socket();
 	check_scan_through_daemon();
 	check_connect();
 	check_bars();

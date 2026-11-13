@@ -39,6 +39,13 @@
 #endif
 
 #define WPA_CLI "wpa_cli"
+
+// The supplicant's control socket: ctrl_interface=/var/run/wpa_supplicant in
+// the stock /etc/wpa_supplicant.conf, which S43wifi_bcm_init_config also writes
+// into /data/wpa_supplicant.conf, and the directory wpa_cli opens without -p.
+#ifndef WPA_CTRL_SOCKET // the self-check points it elsewhere
+#define WPA_CTRL_SOCKET "/var/run/wpa_supplicant/" WIFI_IFACE
+#endif
 #define UDHCPC "udhcpc"
 #define WIFI_ON_SCRIPT "/usr/bin/wifi_on.sh"
 #define WIFI_OFF_SCRIPT "/usr/bin/wifi_off.sh"
@@ -644,19 +651,30 @@ static void enable_all_networks(bool save) {
 // Down matters as much as up: a WIFI:OFF followed at once by a WIFI:ON (the
 // switch flicked twice) would otherwise find the old supplicant still answering,
 // call the radio up, and have it killed a moment later by the queued OFF.
+//
+// Down is read off the control socket, which the supplicant removes on its way
+// out, and not asked over it: a status sent while it is shutting down can go
+// unanswered until wpa_cli's own 10 s timeout (09:58:22 -> 09:58:32 on a
+// Blaze). With no socket at that path while it still runs, it is asked after
+// all. Either way the time is the clock's, not a count of rounds.
 static bool wait_for_supplicant(bool up) {
 	char buf[512];
 	int limit = up ? SUPPLICANT_UP_MS : SUPPLICANT_DOWN_MS;
-	for (int waited = 0; waited < limit; waited += SUPPLICANT_POLL_MS) {
+	bool by_socket = !up && access(WPA_CTRL_SOCKET, F_OK) == 0;
+	uint32_t start = now_ms();
+	int waited = 0;
+	while (waited < limit) {
 		sleep_ms(SUPPLICANT_POLL_MS);
-		bool answers = wpa1("status", buf, sizeof(buf)) == 0 && strstr(buf, "wpa_state=");
+		bool answers = by_socket ? access(WPA_CTRL_SOCKET, F_OK) == 0
+								 : wpa1("status", buf, sizeof(buf)) == 0 && strstr(buf, "wpa_state=");
+		waited = (int)(now_ms() - start);
 		if (answers == up) {
-			printf("wifi: wpa_supplicant %s after %d ms\n", up ? "answered" : "gone",
-				   waited + SUPPLICANT_POLL_MS);
+			printf("wifi: wpa_supplicant %s after %d ms%s\n", up ? "answered" : "gone", waited,
+				   up || by_socket ? "" : " (asked: no control socket)");
 			return true;
 		}
 	}
-	printf("wifi: wpa_supplicant still %s after %d ms\n", up ? "silent" : "answering", limit);
+	printf("wifi: wpa_supplicant still %s after %d ms\n", up ? "silent" : "answering", waited);
 	return false;
 }
 

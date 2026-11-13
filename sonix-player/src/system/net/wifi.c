@@ -47,6 +47,10 @@
 // previous sweep.
 #define SCAN_SETTLE_MS 3000
 
+// How many times a scan's results are read before an empty table is believed:
+// at SCAN_SETTLE_MS, then twice more half of it apart.
+#define SCAN_READS 3
+
 // The status poll while the radio is up. Two seconds is fast enough for the
 // status bar's bars to follow the room and cheap enough to ignore: one wpa_cli
 // fork, with the worker asleep in between.
@@ -484,16 +488,25 @@ static bool parse_network_line(char *line, char *ssid, size_t ssid_size, int *id
 }
 
 // ---------------------------------------------------------------------------
-// The readers. Each prefers the file sys_server wrote, which is the stock path
-// and works even where wpa_cli's control socket cannot be opened, and falls
-// back to wpa_cli when the file is missing or stale.
+// The readers. The files sys_server writes are the stock path and still work
+// where wpa_cli's control socket cannot be opened; each reader below says which
+// of the two it trusts first.
 // ---------------------------------------------------------------------------
 
+// wpa_cli first, and its answer stands even when the table is empty. The file
+// is a dump sys_server takes when it runs a queued WIFI:SCAN, so right after
+// the radio comes up it holds an empty table, and after a power cycle it can
+// hold the last room the radio was in. It is read only when wpa_cli did not
+// run at all.
 static void read_scan_results(char *buf, size_t size) {
-	if (slurp(WIFI_RESULT_FILE, buf, size) && strchr(buf, '\t')) {
+	if (wpa1("scan_results", buf, size) == 0) {
+		char *end = strrchr(buf, '\n');
+		if (end && end[1]) {
+			end[1] = '\0'; // a full buffer ends mid-line: drop the cut one
+		}
 		return;
 	}
-	wpa1("scan_results", buf, size);
+	slurp(WIFI_RESULT_FILE, buf, size);
 }
 
 static void read_saved_networks(char *buf, size_t size) {
@@ -557,6 +570,38 @@ static void run_script(const char *path) {
 	run_argv(argv, NULL, 0);
 }
 
+// How long the radio is given to come up, or to go down, after sys_server has
+// taken the request. wifi_on.sh alone sleeps 1.3 s after starting the
+// supplicant, and the daemon starts a request up to a second after answering it.
+#define SUPPLICANT_UP_MS 8000
+#define SUPPLICANT_DOWN_MS 4000
+#define SUPPLICANT_POLL_MS 250
+
+// sys_server answers "OK" the moment it queues WIFI:ON or WIFI:OFF and runs it
+// up to a second later (its queue thread sleeps a second whenever the queue is
+// empty), so the reply says nothing about the supplicant. Waits until wpa_cli
+// gets an answer out of it (`up`) or stops getting one (`!up`). True when that
+// happened in time.
+//
+// Down matters as much as up: a WIFI:OFF followed at once by a WIFI:ON (the
+// switch flicked twice) would otherwise find the old supplicant still answering,
+// call the radio up, and have it killed a moment later by the queued OFF.
+static bool wait_for_supplicant(bool up) {
+	char buf[512];
+	int limit = up ? SUPPLICANT_UP_MS : SUPPLICANT_DOWN_MS;
+	for (int waited = 0; waited < limit; waited += SUPPLICANT_POLL_MS) {
+		sleep_ms(SUPPLICANT_POLL_MS);
+		bool answers = wpa1("status", buf, sizeof(buf)) == 0 && strstr(buf, "wpa_state=");
+		if (answers == up) {
+			printf("wifi: wpa_supplicant %s after %d ms\n", up ? "answered" : "gone",
+				   waited + SUPPLICANT_POLL_MS);
+			return true;
+		}
+	}
+	printf("wifi: wpa_supplicant still %s after %d ms\n", up ? "silent" : "answering", limit);
+	return false;
+}
+
 static void do_power(bool on) {
 	char command[64];
 	char reply[128];
@@ -564,9 +609,7 @@ static void do_power(bool on) {
 	if (have_sysserver()) {
 		snprintf(command, sizeof(command), on ? "WIFI:ON:%s" : "WIFI:OFF:%s", WIFI_IFACE);
 		if (sysserver_request(command, reply, sizeof(reply)) == 0) {
-			// wifi_on.sh already sleeps inside the daemon, but the interface
-			// finishes coming up shortly after the reply.
-			sleep_ms(on ? 800 : 200);
+			wait_for_supplicant(on);
 			return;
 		}
 	}
@@ -576,11 +619,18 @@ static void do_power(bool on) {
 }
 
 // Reads the scan and the saved list, merges them, and publishes the result.
-static void refresh_networks(void) {
+// True when the scan held at least one line. With `keep_if_empty` an empty scan
+// is not published, so a retry does not replace the list on screen with
+// nothing in between.
+static bool refresh_networks(bool keep_if_empty) {
 	static char scan_buf[16384];
 	static char saved_buf[4096];
 
 	read_scan_results(scan_buf, sizeof(scan_buf));
+	bool scanned = strchr(scan_buf, '\t') != NULL;
+	if (!scanned && keep_if_empty) {
+		return false;
+	}
 	read_saved_networks(saved_buf, sizeof(saved_buf));
 
 	wifi_network_t found[WIFI_MAX_NETWORKS];
@@ -669,30 +719,29 @@ static void refresh_networks(void) {
 	g_network_count = count;
 	g_serial++;
 	pthread_mutex_unlock(&lock);
+	return scanned;
 }
 
 static void do_scan(void) {
-	char reply[128];
-	char command[64];
+	char out[64];
 
-	if (have_sysserver()) {
+	// wpa_cli scan is answered by the supplicant itself. FAIL-BUSY means a scan
+	// is already running: its results are the ones read below.
+	if (wpa1("scan", out, sizeof(out)) != 0 && !out[0] && have_sysserver()) {
+		char reply[128];
+		char command[64];
 		snprintf(command, sizeof(command), "WIFI:SCAN:%s", WIFI_IFACE);
 		sysserver_request(command, reply, sizeof(reply));
-	} else {
-		wpa1("scan", NULL, 0);
 	}
 
-	sleep_ms(SCAN_SETTLE_MS);
-
-	// A second pass: sys_server dumps the results the moment it asks for the
-	// scan, so the first file is one sweep behind.
-	if (have_sysserver()) {
-		snprintf(command, sizeof(command), "WIFI:SCAN:%s", WIFI_IFACE);
-		sysserver_request(command, reply, sizeof(reply));
-		sleep_ms(300);
+	// An empty table right after the radio came up is a sweep not finished yet,
+	// not an empty room: look again twice before saying there is nothing.
+	for (int tries = 0; tries < SCAN_READS; tries++) {
+		sleep_ms(tries ? SCAN_SETTLE_MS / 2 : SCAN_SETTLE_MS);
+		if (refresh_networks(tries + 1 < SCAN_READS)) {
+			break;
+		}
 	}
-
-	refresh_networks();
 }
 
 // The id wpa_supplicant knows this SSID under, or -1.
@@ -1078,7 +1127,7 @@ static void do_connect(const char *ssid, const char *psk) {
 			   wifi_last_failure() == WIFI_FAIL_WRONG_KEY ? "wrong passphrase" : "no answer");
 	}
 	set_op(associated ? WIFI_OP_OK : WIFI_OP_FAILED, ssid);
-	refresh_networks();
+	refresh_networks(false);
 }
 
 // Forgets the live link at once, instead of waiting for the next poll to notice.
@@ -1136,7 +1185,7 @@ static void do_disconnect(void) {
 			if (sysserver_request(command, reply, sizeof(reply)) == 0) {
 				forget_link_state();
 				set_op(WIFI_OP_OK, NULL);
-				refresh_networks();
+				refresh_networks(false);
 				return;
 			}
 		}
@@ -1145,7 +1194,7 @@ static void do_disconnect(void) {
 	wpa1("disconnect", NULL, 0);
 	forget_link_state();
 	set_op(WIFI_OP_OK, NULL);
-	refresh_networks();
+	refresh_networks(false);
 }
 
 static void do_forget(const char *ssid) {
@@ -1182,7 +1231,7 @@ static void do_forget(const char *ssid) {
 	}
 
 	set_op(done ? WIFI_OP_OK : WIFI_OP_FAILED, ssid);
-	refresh_networks();
+	refresh_networks(false);
 }
 
 // The periodic read: link state, signal strength, and a DHCP request if

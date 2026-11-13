@@ -1047,11 +1047,20 @@ static direct_result_t connect_direct(const char *ssid, const char *psk, int *id
 // GROUP_HANDSHAKE -- and the wait simply lets it. Only a supplicant that has
 // been sitting in DISCONNECTED or INACTIVE for ASSOC_PARKED_MS without moving
 // counts as one that has stopped trying.
+//
+// The exception is a four-way handshake that falls back to SCANNING,
+// DISCONNECTED or INACTIVE without completing: the access point dropped it,
+// which is what it does with a wrong passphrase (reason 15 after ~10 s), and
+// the supplicant would only go round again until the wait ran out. That is the
+// verdict, as for the stock sys_server, which reports the first "4-Way
+// Handshake failed" (0x437b90).
 static bool wait_for_association(bool *saw_handshake) {
 	static char buf[2048];
 	char state[32];
 	char last[32] = "";
 	int parked_ms = 0;
+	bool in_handshake = false;
+	uint32_t start = now_ms();
 
 	if (saw_handshake) {
 		*saw_handshake = false;
@@ -1073,8 +1082,17 @@ static bool wait_for_association(bool *saw_handshake) {
 		}
 		// Reaching the four-way handshake means the access point was there and
 		// answered to this name: whatever goes wrong after it is the key.
-		if (saw_handshake && strcmp(state, "4WAY_HANDSHAKE") == 0) {
-			*saw_handshake = true;
+		if (strcmp(state, "4WAY_HANDSHAKE") == 0) {
+			in_handshake = true;
+			if (saw_handshake) {
+				*saw_handshake = true;
+			}
+		} else if (strcmp(state, "GROUP_HANDSHAKE") == 0) {
+			in_handshake = false; // the four-way part is done: the key was right
+		} else if (in_handshake && (strcmp(state, "SCANNING") == 0 || strcmp(state, "DISCONNECTED") == 0 ||
+									strcmp(state, "INACTIVE") == 0)) {
+			printf("wifi: the four-way handshake failed; verdict after %u ms\n", (unsigned)(now_ms() - start));
+			return false;
 		}
 		if (strcmp(state, "DISCONNECTED") == 0 || strcmp(state, "INACTIVE") == 0) {
 			parked_ms += ASSOC_POLL_MS;

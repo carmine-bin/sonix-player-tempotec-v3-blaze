@@ -114,6 +114,9 @@ static const char FAKE_WPA_CLI[] =
 	"status)\n"
 	"  if [ -e \"$D/joined\" ]; then\n"
 	"    printf 'ssid=%s\\nwpa_state=COMPLETED\\nip_address=192.168.1.9\\naddress=00:11:22:33:44:55\\n' \"$(cat \"$D/joined\")\"\n"
+	"  elif [ -s \"$D/states\" ]; then\n"
+	"    printf 'wpa_state=%s\\naddress=00:11:22:33:44:55\\n' \"$(head -n 1 \"$D/states\")\"\n"
+	"    if [ \"$(wc -l < \"$D/states\")\" -gt 1 ]; then sed -i 1d \"$D/states\"; fi\n"
 	"  else printf 'wpa_state=DISCONNECTED\\naddress=00:11:22:33:44:55\\n'; fi ;;\n"
 	"signal_poll) printf 'RSSI=%s\\nLINKSPEED=65\\n' \"$(cat \"$D/rssi\" 2>/dev/null || echo -50)\" ;;\n"
 	"scan) touch \"$D/scanned\"; echo 1 > \"$D/pending\"; echo OK ;;\n"
@@ -137,11 +140,16 @@ static const char FAKE_WPA_CLI[] =
 	"  if [ -e \"$D/noremove\" ]; then echo FAIL; exit 0; fi\n"
 	"  awk -F '\\t' -v id=\"$2\" '$1 != id' \"$D/nets\" > \"$D/nets.new\"; mv \"$D/nets.new\" \"$D/nets\"; echo OK ;;\n"
 	"select_network)\n"
+	"  rm -f \"$D/states\"\n"
 	"  name=$(awk -F '\\t' -v id=\"$2\" '$1 == id { printf \"%s\", $2 }' \"$D/nets\")\n"
 	"  if awk -F '\\t' -v n=\"$name\" '$5 == n { f = 1 } END { exit !f }' \"$D/air\" &&\n"
 	"     ! grep -qx '\"wrongpass1\"' \"$D/psk.$2\" 2>/dev/null; then\n"
 	"    printf '%s' \"$name\" > \"$D/joined\"\n"
-	"  else rm -f \"$D/joined\"; fi\n"
+	"  else\n"
+	"    rm -f \"$D/joined\"\n"
+	"    grep -qx '\"wrongpass1\"' \"$D/psk.$2\" 2>/dev/null &&\n"
+	"      printf 'SCANNING\\n4WAY_HANDSHAKE\\n4WAY_HANDSHAKE\\nSCANNING\\n' > \"$D/states\"\n"
+	"  fi\n"
 	"  echo OK ;;\n"
 	"*) echo OK ;;\n"
 	"esac\n";
@@ -174,6 +182,7 @@ static void ss_execute(const char *command) {
 	} else if (strncmp(command, "WIFI:OFF:", 9) == 0) {
 		drop("up");
 		drop("joined");
+		drop("states");
 	} else if (strncmp(command, "WIFI:SCAN:", 10) == 0) {
 		// The dump is taken when the sweep is asked for: it holds the last
 		// finished one, and this one finishes a little later.
@@ -456,10 +465,16 @@ static void check_connect(void) {
 	assert(count_lines(log, "remove_network 2") == 1 && count_lines(log, "save_config") == 0);
 
 	// A wrong passphrase re-entered for a saved network goes into a new entry,
-	// which is dropped; the saved one is never written over.
+	// which is dropped; the saved one is never written over. The supplicant
+	// goes from the handshake back to SCANNING, as it does when the access
+	// point gives up on it, and that is the verdict: no waiting out the 30 s
+	// (3 s here) while it goes round again.
 	mark_log("wrong again");
+	uint32_t asked = now_ms();
 	wifi_connect("Casa", "wrongpass1");
 	assert(wait_for_op() == WIFI_OP_FAILED);
+	assert(now_ms() - asked < 1500);
+	assert(wifi_last_failure() == WIFI_FAIL_WRONG_KEY);
 	log = log_since("wrong again");
 	assert(count_lines(log, "set_network 1 psk \"wrongpass1\"") == 0);
 	assert(count_lines(log, "set_network 2 psk \"wrongpass1\"") == 1);
@@ -592,6 +607,7 @@ int main(int argc, char **argv) {
 	drop("log");
 	drop("netfile");
 	drop("noremove");
+	drop("states");
 	put("nets", "0\tOtra\tany\t[DISABLED]\n");
 	put("air", AIR);
 	install("wpa_cli", FAKE_WPA_CLI);

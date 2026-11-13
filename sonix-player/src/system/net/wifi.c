@@ -570,6 +570,47 @@ static void run_script(const char *path) {
 	run_argv(argv, NULL, 0);
 }
 
+// Priority 1 for every saved network and 2 for the one being joined, which is
+// what the stock sys_server does (0x4049e0 over its saved list, then 2 for the
+// chosen one at 0x405ac0 and 0x40536c). With all of them enabled again after
+// the join (enable_all_networks), wpa_supplicant prefers the network picked
+// last while it is in range and takes any other saved one when it is not.
+static void set_priorities(int chosen) {
+	static char buf[4096];
+	if (wpa1("list_networks", buf, sizeof(buf)) != 0) {
+		return;
+	}
+
+	char *save_line = NULL;
+	for (char *line = strtok_r(buf, "\n", &save_line); line; line = strtok_r(NULL, "\n", &save_line)) {
+		char name[WIFI_SSID_MAX];
+		char id_text[16];
+		char out[64];
+		int id = -1;
+		bool current = false;
+		if (!parse_network_line(line, name, sizeof(name), &id, &current)) {
+			continue;
+		}
+		snprintf(id_text, sizeof(id_text), "%d", id);
+		wpa4("set_network", id_text, "priority", id == chosen ? "2" : "1", out, sizeof(out));
+	}
+}
+
+// select_network leaves every other saved network disabled, and save_config
+// writes that down, so the player would only ever rejoin the network picked
+// last, reboots included. The stock sys_server ends every join with
+// enable_network all (0x405490, 0x4058c4), after its save_config, so on stock
+// the others stay enabled until wpa_supplicant restarts; here `save` keeps
+// them enabled in the file too. Only networks that are disabled are touched:
+// one parked after a refused handshake (TEMP-DISABLED) stays parked.
+static void enable_all_networks(bool save) {
+	char out[64];
+	wpa2("enable_network", "all", out, sizeof(out));
+	if (save && wpa_ok(out)) {
+		wpa1("save_config", out, sizeof(out));
+	}
+}
+
 // How long the radio is given to come up, or to go down, after sys_server has
 // taken the request. wifi_on.sh alone sleeps 1.3 s after starting the
 // supplicant, and the daemon starts a request up to a second after answering it.
@@ -609,13 +650,21 @@ static void do_power(bool on) {
 	if (have_sysserver()) {
 		snprintf(command, sizeof(command), on ? "WIFI:ON:%s" : "WIFI:OFF:%s", WIFI_IFACE);
 		if (sysserver_request(command, reply, sizeof(reply)) == 0) {
-			wait_for_supplicant(on);
+			// Builds before enable_all_networks() saved every network but the
+			// last one joined as disabled. Enabled again in memory at each
+			// power-on, so the radio finds any of them; the next join saves it.
+			if (wait_for_supplicant(on) && on) {
+				enable_all_networks(false);
+			}
 			return;
 		}
 	}
 
 	run_script(on ? WIFI_ON_SCRIPT : WIFI_OFF_SCRIPT);
 	sleep_ms(on ? 1500 : 300);
+	if (on) {
+		enable_all_networks(false);
+	}
 }
 
 // Reads the scan and the saved list, merges them, and publishes the result.
@@ -947,6 +996,7 @@ static direct_result_t connect_direct(const char *ssid, const char *psk) {
 	if (!wpa_ok(out)) {
 		printf("wifi: scan_ssid not taken for network %s (%s)\n", id_text, out[0] ? out : "no reply");
 	}
+	set_priorities(id);
 
 	wpa2("enable_network", id_text, out, sizeof(out));
 	wpa2("select_network", id_text, out, sizeof(out));
@@ -1134,6 +1184,13 @@ static void do_connect(const char *ssid, const char *psk) {
 		set_fail(has_psk && (handshake || network_rejected(ssid)) ? WIFI_FAIL_WRONG_KEY : WIFI_FAIL_OTHER);
 		printf("wifi: \"%s\" did not join (%s)\n", ssid,
 			   wifi_last_failure() == WIFI_FAIL_WRONG_KEY ? "wrong passphrase" : "no answer");
+	}
+	// After the wait, not before: with the others enabled during the join,
+	// wpa_supplicant could settle on one of them while the page waits for this
+	// one. After a failed join it is what lets the radio go back to a network
+	// that works. sys_server's own join already ends with this.
+	if (direct == DIRECT_OK) {
+		enable_all_networks(true);
 	}
 	set_op(associated ? WIFI_OP_OK : WIFI_OP_FAILED, ssid);
 	refresh_networks(false);

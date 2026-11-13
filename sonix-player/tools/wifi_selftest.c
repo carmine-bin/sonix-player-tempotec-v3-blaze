@@ -127,7 +127,12 @@ static const char FAKE_WPA_CLI[] =
 	"    mv \"$D/nets.new\" \"$D/nets\"\n"
 	"  fi\n"
 	"  echo OK ;;\n"
-	"select_network) awk -F '\\t' -v id=\"$2\" '$1 == id { printf \"%s\", $2 }' \"$D/nets\" > \"$D/joined\"; echo OK ;;\n"
+	"select_network)\n"
+	"  name=$(awk -F '\\t' -v id=\"$2\" '$1 == id { printf \"%s\", $2 }' \"$D/nets\")\n"
+	"  if awk -F '\\t' -v n=\"$name\" '$5 == n { f = 1 } END { exit !f }' \"$D/air\"; then\n"
+	"    printf '%s' \"$name\" > \"$D/joined\"\n"
+	"  else rm -f \"$D/joined\"; fi\n"
+	"  echo OK ;;\n"
 	"*) echo OK ;;\n"
 	"esac\n";
 
@@ -276,6 +281,17 @@ static int count_lines(const char *text, const char *line) {
 	return n;
 }
 
+// Where `line` first appears in `log` as a whole line, or -1.
+static int line_at(const char *log, const char *line) {
+	size_t len = strlen(line);
+	for (const char *p = log; (p = strstr(p, line)); p += len) {
+		if ((p == log || p[-1] == '\n') && p[len] == '\n') {
+			return (int)(p - log);
+		}
+	}
+	return -1;
+}
+
 // ---------------------------------------------------------------------------
 // the checks
 // ---------------------------------------------------------------------------
@@ -290,6 +306,8 @@ static void check_power_on(void) {
 	wifi_init();
 	assert(wait_until(not_busy, 5000));
 	assert(exists("up"));
+	// Networks an older build saved as disabled come back at power-on.
+	assert(line_at(read_log(), "enable_network all") >= 0);
 	settle();
 	printf("selftest: power on waits for the supplicant\n");
 }
@@ -337,7 +355,9 @@ static wifi_op_t wait_for_op(void) {
 	return WIFI_OP_FAILED;
 }
 
-// Joining by name, new or saved, asks the supplicant to probe for it.
+// Joining by name, new or saved, asks the supplicant to probe for it, ranks the
+// saved networks as the stock daemon does, and enables them all again once the
+// join is over, whether it worked or not.
 static void check_connect(void) {
 	settle();
 	mark_log("join new");
@@ -346,14 +366,23 @@ static void check_connect(void) {
 	const char *log = log_since("join new");
 	assert(count_lines(log, "add_network") == 1);
 	assert(count_lines(log, "set_network 1 scan_ssid 1") == 1);
+	int low = line_at(log, "set_network 0 priority 1");
+	int high = line_at(log, "set_network 1 priority 2");
+	int select = line_at(log, "select_network 1");
+	int all = line_at(log, "enable_network all");
+	assert(low >= 0 && high >= 0 && low < select && high < select);
+	assert(all > select && line_at(log + all, "save_config") > 0);
 
+	// Out of range: the join fails, and the others come back all the same.
 	mark_log("join saved");
 	wifi_connect("Otra", NULL);
-	assert(wait_for_op() == WIFI_OP_OK);
+	assert(wait_for_op() == WIFI_OP_FAILED);
 	log = log_since("join saved");
 	assert(count_lines(log, "add_network") == 0);
 	assert(count_lines(log, "set_network 0 scan_ssid 1") == 1);
-	printf("selftest: every join sets scan_ssid\n");
+	assert(line_at(log, "set_network 0 priority 2") >= 0 && line_at(log, "set_network 1 priority 1") >= 0);
+	assert(line_at(log, "enable_network all") > line_at(log, "select_network 0"));
+	printf("selftest: every join sets scan_ssid and priorities, and enables the rest after\n");
 }
 
 int main(int argc, char **argv) {

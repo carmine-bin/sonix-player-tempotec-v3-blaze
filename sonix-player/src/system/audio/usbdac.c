@@ -6,6 +6,7 @@
 #include "src/system/audio/audio.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
+#include "src/system/device/axpcharge.h"
 #include "src/system/device/power.h"
 #include "src/system/device/system.h"
 #include "src/system/device/usb.h"
@@ -468,8 +469,11 @@ static void apply_charging(void) {
 	power_set_charging_allowed(on);
 
 	// Say so where the user looks: with the charger off the battery icon and
-	// the LED must stop claiming a charge is happening.
-	system_suppress_charging(!on);
+	// the LED must stop claiming a charge is happening. On the Blaze
+	// axpcharge.c says it itself, and only once the charger has really stopped.
+	if (!axpcharge_cable_policy()) {
+		system_suppress_charging(!on);
+	}
 	printf("usbdac: charging %s while in DAC mode\n", on ? "allowed" : "held off");
 }
 
@@ -850,7 +854,9 @@ void usbdac_stop(void) {
 
 	// Leaving DAC mode gives the charger back, and the indication with it.
 	power_set_charging_allowed(true);
-	system_suppress_charging(false);
+	if (!axpcharge_cable_policy()) {
+		system_suppress_charging(false);
+	}
 
 	gadget_teardown();
 

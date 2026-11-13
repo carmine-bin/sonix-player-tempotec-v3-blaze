@@ -313,8 +313,9 @@ static bool g_screen_view_hold; // see power_hold_screen_for_view
 // powered on from the charger alone.
 //
 // The two nodes under /sys/class/power_supply/usb/ the stock player writes are
-// not used at all: on the R3 Pro II that supply is the AXP2101 PMIC, not the
-// charger, and writing them does nothing to charging.
+// not used here: on the R3 Pro II that supply is the AXP2101 PMIC, not the
+// charger, and writing them does nothing to charging. On the Blaze the PMIC IS
+// the charger, and axpcharge.c writes them (axpcharge_cable_policy()).
 #define STEP_CHARGING_NODE "/sys/class/power_supply/mp2731-charger/step_charging_enabled"
 
 // The open mp2731.ko keeps the limit itself: given the percentage once, it
@@ -467,6 +468,13 @@ static void apply_charge_limit(void) {
 // is doing. DAC mode is the one caller: the choice is the user's and the
 // percentage limit must not undo it.
 void power_set_charging_allowed(bool allowed) {
+	// The Blaze has no MP2731: its PMIC is the charger, and axpcharge.c stops
+	// it with a charge current of 0, decided with the rest of its currents.
+	if (axpcharge_cable_policy()) {
+		axpcharge_block_charging(!allowed);
+		return;
+	}
+
 	find_charge_node();
 	g_charging_blocked = !allowed;
 

@@ -78,6 +78,7 @@ typedef struct {
 	bool one_boot_logo;		   // /etc/logo.jpeg whatever the theme; logo1/logo2 are not its own (bootlogo.h)
 	bool boot_animation;	   // plays TempoTec's frames over that logo at startup (bootanim.h)
 	bool slow_pan;			   // FBIOPAN_DISPLAY holds the caller 10-16 ms: drawn into RAM, flipped on a thread (main.c)
+	bool cable_charge_policy;  // input and charge current set by the kind of cable, as its stock player does (axpcharge.h)
 } sysinfo_model_t;
 
 // The entry for the name in the file, or NULL when the file says nothing or

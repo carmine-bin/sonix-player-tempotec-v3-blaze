@@ -76,6 +76,9 @@ static const sysinfo_model_t MODELS[] = {
 		.boot_animation = true,
 		// The RAM-less ST77903 takes a new page at 45 Hz.
 		.slow_pan = true,
+		// Its stock hiby_player raises the PMIC's input limit for a wall
+		// charger; the driver alone leaves it at 500 mA.
+		.cable_charge_policy = true,
 	},
 };
 

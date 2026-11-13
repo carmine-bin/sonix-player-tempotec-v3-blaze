@@ -465,6 +465,8 @@ test:
 	$(TEST_DIR)/bootlogo_selftest $(TEST_DIR)
 	$(CC) -O2 -Wall -DHOST_BUILD -I. -I$(LVGL_DIR) tools/wifi_selftest.c -lpthread -o $(TEST_DIR)/wifi_selftest
 	$(TEST_DIR)/wifi_selftest $(TEST_DIR)
+	$(CC) -O2 -Wall -I. tools/axpcharge_selftest.c -o $(TEST_DIR)/axpcharge_selftest
+	$(TEST_DIR)/axpcharge_selftest $(TEST_DIR) > $(TEST_DIR)/axpcharge_selftest.log
 	@echo "test: all self-checks passed."
 
 # The flags every target object was compiled with, the optimisation levels

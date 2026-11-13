@@ -371,6 +371,61 @@ int main(int argc, char **argv) {
 	udc("not attached");
 	regs[0x62] = 0x0d;
 
+	// A wall charger, then straight into a PC without VBUS dropping between
+	// two looks: a host at once.
+	vbus = true;
+	run(8000);
+	expect(0, 1000, 5, 16, "wall charger again");
+	udc("configured");
+	run(1000);
+	expect(500, 500, 1, 11, "wall charger swapped for a PC between two looks: a host");
+	vbus = false;
+	run(1000);
+	udc("not attached");
+
+	// A PC asleep before the plug looks like a wall charger (stock calls it
+	// one too); its port sags at 2000 mA: back to 500 for this cable.
+	udc("suspended");
+	vbus = true;
+	run(8000);
+	expect(0, 1000, 5, 16, "PC asleep before the plug: taken for a wall charger");
+	regs[0x01] |= 0x08; // VINDPM
+	run(2000);
+	expect(0, 1000, 5, 16, "VINDPM at two looks: still 2000");
+	run(1000);
+	expect(500, 780, 1, 13, "VINDPM at three looks: 500 mA in for this cable");
+	regs[0x01] &= (uint8_t)~0x08;
+	run(20000);
+	expect(500, 780, 1, 13, "VINDPM gone: still 500 until the cable is pulled");
+	vbus = false;
+	run(1000);
+	udc("not attached");
+	vbus = true;
+	run(8000);
+	expect(0, 1000, 5, 16, "a new cable: a wall charger again");
+
+	// The port's protection cuts VBUS soon after the raise: the cable that
+	// comes back stays at 500 mA, and does not trip it again.
+	vbus = false;
+	run(16000);
+	vbus = true;
+	run(8000);
+	expect(0, 1000, 5, 16, "replugged after 16 s: a wall charger");
+	run(500);
+	vbus = false; // cut within 3 s of the raise
+	run(3000);
+	vbus = true;
+	run(20000);
+	expect(500, 780, 1, 13, "back 3 s after a cut at 2000 mA: stays at 500");
+	vbus = false;
+	run(20000);
+	vbus = true;
+	run(8000);
+	expect(0, 1000, 5, 16, "back 20 s later: a wall charger again");
+	vbus = false; // 2 s after the raise again: let that cut age out
+	run(16000);
+	regs[0x62] = 0x0d;
+
 	// The 500 mA switch on a wall charger: 2000 in, 500 into the battery.
 	axpcharge_set(false, true);
 	vbus = true;

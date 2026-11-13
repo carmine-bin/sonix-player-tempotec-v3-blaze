@@ -43,9 +43,12 @@ void axpcharge_tick(void);
 //   * no cable, or one not told apart yet: the driver's own defaults, 500 mA
 //     in and its 780 mA setting -- what every release before this charged with.
 //
+// A cable taken for a wall charger that then cannot hold VBUS up at 2000 mA,
+// or whose port cuts it, goes back to 500 mA in until it is pulled.
+//
 // The 500 mA switch caps the charge current of all three. The 80 % cap's stop
-// and the stop for DAC mode are a charge current of 0 in the same decision
-// (stock's own way), while a cable is in. Nothing is ever asked above stock's
+// and the stop for DAC mode are a charge current of 0 in the same decision,
+// while a cable is in; the cable goes on carrying the player. Nothing is ever asked above stock's
 // numbers.
 bool axpcharge_cable_policy(void);
 

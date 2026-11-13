@@ -34,7 +34,9 @@
 #define WIFI_RESULT_FILE "/data/wifi_result.txt"
 #endif
 #define WIFI_STATUS_FILE "/data/wifi_status.txt"
+#ifndef WIFI_NETWORK_FILE
 #define WIFI_NETWORK_FILE "/data/wifi_network.txt"
+#endif
 
 #define WPA_CLI "wpa_cli"
 #define UDHCPC "udhcpc"
@@ -518,11 +520,17 @@ static void read_scan_results(char *buf, size_t size) {
 	slurp(WIFI_RESULT_FILE, buf, size);
 }
 
+// The same rule for the saved list. sys_server rewrites its file only when it
+// joins or lists, and when the supplicant reports a link going up or down
+// (0x40496c, 0x404bc8, 0x405878, 0x437a4c, 0x437b3c, 0x437c38) -- never for a
+// network removed -- so after a forget the file still names it, under an id
+// the supplicant no longer has. An empty list from wpa_cli is an answer too:
+// nothing saved.
 static void read_saved_networks(char *buf, size_t size) {
-	if (slurp(WIFI_NETWORK_FILE, buf, size) && strchr(buf, '\t')) {
+	if (wpa1("list_networks", buf, size) == 0) {
 		return;
 	}
-	wpa1("list_networks", buf, size);
+	slurp(WIFI_NETWORK_FILE, buf, size);
 }
 
 static void read_status(char *buf, size_t size) {
@@ -811,19 +819,13 @@ static void do_scan(void) {
 	}
 }
 
-// The id wpa_supplicant knows this SSID under, or -1.
-//
-// This one asks wpa_cli and only falls back to the file sys_server wrote, which
-// is the opposite of what the list on screen does, and deliberately. The file
-// is rewritten only when a scan is asked for, so between two scans it can name
-// networks under numbers wpa_supplicant has since given to something else --
-// and unlike a row drawn one id out of date, "WIFI:CONNECT:wlan0 3" with a
-// stale 3 joins the wrong network or nothing at all.
+// The id wpa_supplicant knows this SSID under, or -1. From wpa_cli, like the
+// list on screen: the file sys_server wrote can name networks under numbers
+// wpa_supplicant has since removed or given to something else, and a stale id
+// joins the wrong network or nothing at all.
 static int saved_network_id(const char *ssid) {
 	static char buf[4096];
-	if (!(wpa1("list_networks", buf, sizeof(buf)) == 0 && strchr(buf, '\t'))) {
-		read_saved_networks(buf, sizeof(buf));
-	}
+	read_saved_networks(buf, sizeof(buf));
 
 	char *save_line = NULL;
 	for (char *line = strtok_r(buf, "\n", &save_line); line; line = strtok_r(NULL, "\n", &save_line)) {
@@ -1151,7 +1153,7 @@ static void do_connect(const char *ssid, const char *psk) {
 	// The length is worth having in the log next to the name: a name that came
 	// out short is the whole story, and quotes alone do not show it.
 	printf("wifi: joining \"%s\" (%d characters, %s)\n", ssid, (int)strlen(ssid),
-		   has_psk ? "with a passphrase" : "open");
+		   has_psk ? "with a passphrase" : "no passphrase typed: saved or open");
 
 	// wpa_cli first, sys_server second, which is the other way round from every
 	// other request in this file -- and deliberately.
@@ -1330,20 +1332,29 @@ static void do_forget(const char *ssid) {
 
 	bool was_current = is_current_network(ssid);
 
+	// wpa_cli first: it is done when it answers, so the list read below no
+	// longer has the network. sys_server's WIFI:REMOVE answers OK when it
+	// queues the work and runs it up to a second later, after that read.
 	bool done = false;
-	if (have_sysserver()) {
+	char id_text[16];
+	char out[128];
+	snprintf(id_text, sizeof(id_text), "%d", id);
+	int rc = wpa2("remove_network", id_text, out, sizeof(out));
+	if (rc == 0 || out[0]) {
+		done = wpa_ok(out);
+		if (done) {
+			wpa1("save_config", out, sizeof(out));
+			if (!wpa_ok(out)) {
+				printf("wifi: network %s removed, but save_config failed (%s)\n", id_text, out[0] ? out : "no reply");
+			}
+		} else {
+			printf("wifi: remove_network %s failed (%s)\n", id_text, out[0] ? out : "no reply");
+		}
+	} else if (have_sysserver()) {
 		char command[64];
 		char reply[128];
 		snprintf(command, sizeof(command), "WIFI:REMOVE:%s %d", WIFI_IFACE, id);
 		done = sysserver_request(command, reply, sizeof(reply)) == 0;
-	}
-
-	if (!done) {
-		char id_text[16];
-		char out[128];
-		snprintf(id_text, sizeof(id_text), "%d", id);
-		done = wpa2("remove_network", id_text, out, sizeof(out)) == 0;
-		wpa1("save_config", out, sizeof(out));
 	}
 
 	// Removing a network does not always bring the link down with it -- the

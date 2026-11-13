@@ -26,8 +26,10 @@ static int fake_nanosleep(const struct timespec *req, struct timespec *rem) {
 	return nanosleep(&scaled, rem);
 }
 static int fake_access(const char *path, int mode);
-static char result_file[600]; // sys_server's /data/wifi_result.txt
+static char result_file[600];  // sys_server's /data/wifi_result.txt
+static char network_file[600]; // and its /data/wifi_network.txt
 #define WIFI_RESULT_FILE result_file
+#define WIFI_NETWORK_FILE network_file
 #define nanosleep fake_nanosleep
 #define access fake_access
 #include "src/system/net/wifi.c"
@@ -132,6 +134,7 @@ static const char FAKE_WPA_CLI[] =
 	"  if [ \"$3\" = psk ]; then echo \"$4\" > \"$D/psk.$2\"; fi\n"
 	"  echo OK ;;\n"
 	"remove_network)\n"
+	"  if [ -e \"$D/noremove\" ]; then echo FAIL; exit 0; fi\n"
 	"  awk -F '\\t' -v id=\"$2\" '$1 != id' \"$D/nets\" > \"$D/nets.new\"; mv \"$D/nets.new\" \"$D/nets\"; echo OK ;;\n"
 	"select_network)\n"
 	"  name=$(awk -F '\\t' -v id=\"$2\" '$1 == id { printf \"%s\", $2 }' \"$D/nets\")\n"
@@ -160,7 +163,8 @@ static pthread_mutex_t ss_lock = PTHREAD_MUTEX_INITIALIZER;
 static char ss_queue[16][96];
 static int ss_head, ss_count;
 static bool ss_running;
-static int ss_scans; // WIFI:SCAN requests seen
+static int ss_scans;   // WIFI:SCAN requests seen
+static int ss_removes; // WIFI:REMOVE requests seen
 
 static void ss_execute(const char *command) {
 	if (strncmp(command, "WIFI:ON:", 8) == 0) {
@@ -224,6 +228,9 @@ int sysserver_request(const char *command, char *reply, size_t reply_size) {
 	ss_count++;
 	if (strncmp(command, "WIFI:SCAN:", 10) == 0) {
 		ss_scans++;
+	}
+	if (strncmp(command, "WIFI:REMOVE:", 12) == 0) {
+		ss_removes++;
 	}
 	pthread_mutex_unlock(&ss_lock);
 	if (reply && reply_size) {
@@ -514,6 +521,60 @@ static void check_bars(void) {
 	printf("selftest: bars at -60 / -70 / -90, as stock\n");
 }
 
+static bool listed_as_saved(const char *ssid) {
+	wifi_network_t nets[WIFI_MAX_NETWORKS];
+	int n = wifi_get_networks(nets, WIFI_MAX_NETWORKS);
+	for (int i = 0; i < n; i++) {
+		if (strcmp(nets[i].ssid, ssid) == 0) {
+			return nets[i].saved;
+		}
+	}
+	return false;
+}
+
+// Forgetting goes through wpa_cli, saves only once the removal is taken, and
+// the list no longer calls the network saved -- even though sys_server's file,
+// which it does not rewrite on a removal, still names it.
+static void check_forget(void) {
+	settle();
+	int casa = saved_network_id("Casa");
+	assert(casa >= 0 && saved_network_id("Otra") == 0);
+	char dump[256];
+	snprintf(dump, sizeof(dump), "network id / ssid / bssid / flags\n0\tOtra\tany\t[DISABLED]\n%d\tCasa\tany\t[CURRENT]\n",
+			 casa);
+	put("netfile", dump);
+	int removes_before = ss_removes;
+
+	mark_log("forget");
+	wifi_forget("Casa");
+	assert(wait_for_op() == WIFI_OP_OK);
+	settle();
+	const char *log = log_since("forget");
+	char removed[64];
+	snprintf(removed, sizeof(removed), "remove_network %d", casa);
+	assert(line_at(log, removed) >= 0 && line_at(log, "save_config") > line_at(log, removed));
+	assert(ss_removes == removes_before); // not the queued WIFI:REMOVE
+	assert(saved_network_id("Casa") < 0);
+	assert(!listed_as_saved("Casa"));
+
+	// The last one: wpa_cli lists nothing, and nothing is what counts.
+	wifi_forget("Otra");
+	assert(wait_for_op() == WIFI_OP_OK);
+	settle();
+	assert(saved_network_id("Otra") < 0);
+	assert(!listed_as_saved("Otra"));
+
+	// A removal the supplicant turns down is not saved, and says so.
+	put("nets", "0\tOtra\tany\t[DISABLED]\n");
+	put("noremove", "");
+	mark_log("forget refused");
+	wifi_forget("Otra");
+	assert(wait_for_op() == WIFI_OP_FAILED);
+	drop("noremove");
+	assert(count_lines(log_since("forget refused"), "save_config") == 0);
+	printf("selftest: forget goes through wpa_cli, and the list follows it at once\n");
+}
+
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		fprintf(stderr, "usage: %s WORKDIR\n", argv[0]);
@@ -522,12 +583,15 @@ int main(int argc, char **argv) {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	snprintf(dir, sizeof(dir), "%s/wifi", argv[1]);
 	snprintf(result_file, sizeof(result_file), "%s/result", dir);
+	snprintf(network_file, sizeof(network_file), "%s/netfile", dir);
 	mkdir(argv[1], 0755);
 	mkdir(dir, 0755);
 	drop("up");
 	drop("joined");
 	drop("scanned");
 	drop("log");
+	drop("netfile");
+	drop("noremove");
 	put("nets", "0\tOtra\tany\t[DISABLED]\n");
 	put("air", AIR);
 	install("wpa_cli", FAKE_WPA_CLI);
@@ -549,6 +613,7 @@ int main(int argc, char **argv) {
 	check_scan_through_daemon();
 	check_connect();
 	check_bars();
+	check_forget();
 
 	printf("selftest: all Wi-Fi checks passed\n");
 	return 0;

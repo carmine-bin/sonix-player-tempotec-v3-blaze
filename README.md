@@ -15,8 +15,9 @@ The upstream README, with the full build documentation and the source tree, is
 in [UPSTREAM-README.md](UPSTREAM-README.md). Features are in
 [FEATURES.md](FEATURES.md).
 
-The released images carry Last.fm keys only, so Tidal, Qobuz and podcasts stay
-off in them; see [Building](#building) to make an image with keys of your own.
+From 1.3.0.6-blaze the released images carry keys for Tidal, Qobuz and
+Last.fm; podcasts stay off in them. The keys are not in this repository: an
+image built from it needs keys of your own, see [Building](#building).
 
 ## Install
 

@@ -15,4 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # batterystats_selftest pulls in audio.h, which includes <alsa/asoundlib.h>.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: make -C sonix-player test

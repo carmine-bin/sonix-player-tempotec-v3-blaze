@@ -1331,8 +1331,14 @@ static int volume_step_delta(int code) {
 // The keys always move the volume, over Bluetooth as over the jack: the step
 // reaches the stream itself, so synchronised, bluealsa passes it on to the
 // headphones, and separate, bluealsa attenuates on this side.
+//
+// Unless the volume is locked. The level is still announced, unchanged: the
+// pill it raises carries the padlock, which is the answer to "why did the key
+// do nothing".
 static void apply_volume_step(int code) {
-	device_state_change_volume_percent(volume_step_delta(code));
+	if (!volume_lock_enabled()) {
+		device_state_change_volume_percent(volume_step_delta(code));
+	}
 	gui_notify_volume(device_state_get_volume_percent());
 }
 

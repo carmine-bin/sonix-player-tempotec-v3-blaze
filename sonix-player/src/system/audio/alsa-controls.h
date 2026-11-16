@@ -231,4 +231,21 @@ void volume_limit_set_enabled(bool on);
 int volume_limit(volume_output_t out); // 100 for an output that has none
 void volume_limit_set(volume_output_t out, int percent);
 
+// The volume lock (the control centre's padlock): while it is on, the level
+// stays where it is against everything that asks on the user's behalf -- the
+// keys on the case, the cable's remote, the slider, the app, a phone over
+// DLNA. Those routes ask here first and do nothing when the answer is yes;
+// set_volume_percent() itself does not look, because what is not a request has
+// to keep working: each output still comes up at its own level, the limit still
+// brings a level down, line out still takes the jack to its own.
+//
+// Bluetooth headphones' own buttons are not locked. Their volume lives in
+// them and moves whatever this side does; a player that refused to follow
+// would only be showing the wrong number.
+//
+// Kept across restarts: it is switched on for a pocket, and a pocket is where
+// a player gets restarted by accident.
+bool volume_lock_enabled(void);
+void volume_lock_set_enabled(bool on);
+
 #endif

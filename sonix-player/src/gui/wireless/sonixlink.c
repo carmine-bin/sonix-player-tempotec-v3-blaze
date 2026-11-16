@@ -461,7 +461,9 @@ static void apply_command(const sonixlink_command_t *cmd) {
 		device_state_seek((double)cmd->arg);
 		break;
 	case SONIXLINK_CMD_VOLUME:
-		set_volume_percent(cmd->arg);
+		if (!volume_lock_enabled()) { // locked: the app reads the level back unchanged
+			set_volume_percent(cmd->arg);
+		}
 		gui_notify_volume(get_volume_percent());
 		break;
 	case SONIXLINK_CMD_MODE:

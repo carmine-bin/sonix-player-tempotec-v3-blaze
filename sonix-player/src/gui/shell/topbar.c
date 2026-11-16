@@ -280,8 +280,13 @@ void topbar_refresh_volume(int percent) {
 		lv_obj_remove_local_style_prop(vol_label, LV_STYLE_TEXT_COLOR, 0);
 	}
 
+	// With the volume locked the padlock takes the glyph's place at any level:
+	// it is there the whole time the lock is, which is how a key that does
+	// nothing explains itself on a page with no pill.
 	const lv_image_dsc_t *icon = &icon_volume_high;
-	if (percent < VOLUME_LOW_PERCENT) {
+	if (volume_lock_enabled()) {
+		icon = &icon_volume_locked;
+	} else if (percent < VOLUME_LOW_PERCENT) {
 		icon = &icon_volume_mute;
 	} else if (percent < VOLUME_HIGH_PERCENT) {
 		icon = &icon_volume_low;

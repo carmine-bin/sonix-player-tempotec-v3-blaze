@@ -89,6 +89,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **The same volume curve** as the stock player.
 - **Remember volume** - one level for each output: 3.5 mm, 4.4 mm, USB-C and Bluetooth.
 - **Volume limit** - a maximum volume for each output.
+- **Volume lock** - a control centre button that freezes the volume: the keys, the cable's remote, the on-screen slider, the app and DLNA stop changing it until you turn it off. A padlock shows in the status bar. Bluetooth headphones' own buttons still work.
 - **Volume steps** - how much one press of the volume key changes the volume.
 - **Line out** - the jack goes to a fixed level for an amplifier, and your volume comes back when you turn it off.
 - **USB DAC** - connect the player to a computer and it becomes its sound card, from 32 kHz to 384 kHz. You can choose whether it charges at the same time.
@@ -165,7 +166,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 ## Control centre and status bar
 
-- Pull down from the status bar (or tap it) to open the **Control centre**: what is playing, brightness, and buttons for Wi-Fi, Bluetooth, AirPlay, DLNA, SonixLink, Wi-Fi transfer, EQ, PEQ, MSEB, Fade, Gapless, Gain, Line out and the three sleep timers.
+- Pull down from the status bar (or tap it) to open the **Control centre**: what is playing, brightness, and buttons for Wi-Fi, Bluetooth, AirPlay, DLNA, SonixLink, Wi-Fi transfer, EQ, PEQ, MSEB, Fade, Gapless, Gain, Line out, Volume lock and the three sleep timers.
 - Choose which buttons are shown and in what order.
 - The status bar shows the clock and the battery, and can stay on in Now Playing too.
 

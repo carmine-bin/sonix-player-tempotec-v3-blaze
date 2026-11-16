@@ -117,6 +117,8 @@ ICONS = [
     ("lineout.svg", "lineout_status", 26), # and while line out holds the jack
     ("volume-1.svg", "volume_low", 30),
     ("volume-2.svg", "volume_high", 30),
+    # In place of whichever of the three is showing while the volume lock is on.
+    ("volume-lock.svg", "volume_locked", 30),
     # Power menu.
     ("power-off.svg", "power_off", 56),
     ("reboot.svg", "reboot", 56),
@@ -224,6 +226,8 @@ ICONS = [
     # the gap itself -- the two halves apart while off, closed up while on.
     ("gapless-on-quick.svg", "gapless_on_quick", 46),
     ("gapless-off-quick.svg", "gapless_off_quick", 46),
+    # The volume lock: the status bar's own drawing at circle size, like AirPlay.
+    ("volume-lock.svg", "volume_lock_quick", 46),
     # File types, in the file manager and on the web page: one glyph per
     # family, at the size of the folder beside them.
     ("files-music.svg", "files_music", 32),

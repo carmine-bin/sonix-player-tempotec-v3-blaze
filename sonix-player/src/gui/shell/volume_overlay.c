@@ -88,7 +88,9 @@ static void hide_cb(lv_timer_t *timer) {
 
 static void set_icon_for(int percent) {
 	const lv_image_dsc_t *icon = &icon_volume_high;
-	if (percent < VOLUME_LOW_PERCENT) {
+	if (volume_lock_enabled()) {
+		icon = &icon_volume_locked;
+	} else if (percent < VOLUME_LOW_PERCENT) {
 		icon = &icon_volume_mute;
 	} else if (percent < VOLUME_HIGH_PERCENT) {
 		icon = &icon_volume_low;
@@ -96,12 +98,30 @@ static void set_icon_for(int percent) {
 	lv_image_set_src(overlay_icon, icon);
 }
 
+// With the volume locked the scale is a gauge and not a control: it takes no
+// finger and loses its knob, which is what says so. Checked every time the pill
+// comes up, since the lock is switched from the control centre.
+static void apply_lock(void) {
+	bool locked = volume_lock_enabled();
+	if (locked == lv_obj_has_state(overlay_slider, LV_STATE_DISABLED)) {
+		return;
+	}
+	if (locked) {
+		lv_obj_add_state(overlay_slider, LV_STATE_DISABLED);
+	} else {
+		lv_obj_remove_state(overlay_slider, LV_STATE_DISABLED);
+	}
+	lv_obj_set_style_opa(overlay_slider, locked ? LV_OPA_TRANSP : LV_OPA_COVER, LV_PART_KNOB);
+}
+
 // The finger moved the slider: apply it and keep the pill up.
 static void slider_changed_cb(lv_event_t *e) {
 	(void)e;
 	int percent = (int)lv_slider_get_value(overlay_slider);
 
-	set_volume_percent(percent);
+	if (!volume_lock_enabled()) {
+		set_volume_percent(percent);
+	}
 
 	// What the output is really at, which is not always what was asked for:
 	// line out holds a fixed level, and a pill showing a number the hardware
@@ -141,6 +161,7 @@ void volume_overlay_show(int percent) {
 
 	set_icon_for(percent);
 	shown_percent = percent;
+	apply_lock();
 
 	// Re-read the palette each time, so a theme or accent change shows up
 	// without a restart.

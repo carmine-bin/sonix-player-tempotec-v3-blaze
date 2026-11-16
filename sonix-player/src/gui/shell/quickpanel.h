@@ -67,6 +67,10 @@ typedef enum {
 	QP_BTN_SLEEP_PODCAST,
 	QP_BTN_WIFI_TRANSFER,
 	QP_BTN_GAPLESS,
+	// Freezes the volume against the keys, the remote, the slider and the app
+	// (alsa-controls.h). One more button than the grid has places, which the
+	// layout already allows for: the ones left out are a list of their own.
+	QP_BTN_VOLUME_LOCK,
 	QP_BTN_COUNT,
 	QP_BTN_NONE = QP_BTN_COUNT, // an empty place in the grid
 } quickpanel_button_t;

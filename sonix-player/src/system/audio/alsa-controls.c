@@ -1063,6 +1063,31 @@ void volume_limit_set_enabled(bool on) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// The volume lock (see alsa-controls.h)
+// ---------------------------------------------------------------------------
+
+// Read by the key threads and written by the interface. -1 until the config
+// has been asked, which happens on the first question rather than at init for
+// the same reason as the limit's.
+static volatile int lock_on = -1;
+
+bool volume_lock_enabled(void) {
+	int on = lock_on;
+	if (on < 0) {
+		on = config_get_int("audio", "volume_lock", 0) != 0;
+		lock_on = on;
+	}
+	return on != 0;
+}
+
+void volume_lock_set_enabled(bool on) {
+	lock_on = on ? 1 : 0;
+	config_set_int("audio", "volume_lock", on ? 1 : 0);
+	config_save();
+	printf("volume: %s\n", on ? "locked" : "unlocked");
+}
+
 void volume_limit_set(volume_output_t out, int percent) {
 	limit_load();
 	if (!output_in_range(out) || !LIMIT_KEYS[out]) {

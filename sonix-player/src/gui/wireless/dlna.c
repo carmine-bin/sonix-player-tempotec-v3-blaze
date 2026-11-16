@@ -130,7 +130,11 @@ static void apply_command(const dlna_command_t *cmd) {
 		device_state_seek(cmd->position);
 		break;
 	case DLNA_CMD_VOLUME:
-		set_volume_percent(cmd->volume);
+		// Not with the volume locked. Some controllers send their own slider's
+		// position as they connect, which is a jump nobody asked for.
+		if (!volume_lock_enabled()) {
+			set_volume_percent(cmd->volume);
+		}
 		gui_notify_volume(get_volume_percent());
 		break;
 	case DLNA_CMD_NONE:

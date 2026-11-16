@@ -14,6 +14,7 @@
 
 #include "src/system/audio/audio.h"
 #include "src/system/audio/eq.h"
+#include "src/system/core/bootprof.h"
 #include "src/system/core/config.h"
 #include "src/system/decode/aacdec.h"
 #include "src/system/net/hls.h"
@@ -1409,7 +1410,7 @@ bool radio_custom_file_present(void) {
 // from radio_play(), so nothing else has to remember to.
 static void recent_note(const radio_station_t *station) {
 	pthread_mutex_lock(&store_lock);
-	store_put("RECENT", "played", station);
+	BOOTPROF_CALL("radio store_put RECENT", store_put("RECENT", "played", station));
 
 	// PRIMARY KEY means the same station cannot be in here twice, so the trim
 	// only ever has to drop what has fallen off the end.

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <time.h>
 
+#include "src/system/core/bootprof.h"
 #include "src/system/device/clock.h"
 #include "src/system/library/library.h"
 
@@ -61,5 +62,5 @@ void playhistory_left(void) {
 	// A time that is not known is not written down as one: the history would
 	// file the entry under a day in 1970.
 	long long when = clock_is_set() ? (long long)time(NULL) : 0;
-	library_history_add(path, title, artist, when);
+	BOOTPROF_CALL("library_history_add", library_history_add(path, title, artist, when));
 }

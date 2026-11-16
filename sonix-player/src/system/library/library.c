@@ -1,6 +1,7 @@
 #include "library.h"
 
 #include "src/system/library/albumart.h"
+#include "src/system/core/bootprof.h"
 #include "src/system/core/frameprof.h"
 
 // SQLite's page cache for the library, in the form PRAGMA cache_size takes
@@ -1438,7 +1439,7 @@ bool library_open(const char *db_path) {
 	bump_all_generations(); // a different card is a different set of row ids
 	pthread_mutex_unlock(&db_lock);
 
-	next_mount_serial();
+	BOOTPROF_CALL("next_mount_serial", next_mount_serial());
 
 	snprintf(db_file, sizeof(db_file), "%s", db_path);
 	file_identity_read(db_path, &db_identity);
@@ -1597,7 +1598,7 @@ static bool replace_damaged(void) {
 	}
 	db_damaged = false;
 	file_identity_read(path, &db_identity);
-	next_mount_serial();
+	BOOTPROF_CALL("next_mount_serial", next_mount_serial());
 	sortkeys_start_backfill();
 	printf("library: the damaged database is kept as %s; scanning into a new one\n", moved ? aside : "(not moved)");
 	return moved;

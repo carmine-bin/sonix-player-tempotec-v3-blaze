@@ -22,6 +22,7 @@
 #include "src/gui/shell/icons.h"
 #include "src/gui/shell/uiscale.h"
 #include "src/gui/shell/gui.h"
+#include "src/system/core/bootprof.h"
 #include "src/system/core/frameprof.h"
 #include "src/system/core/wakeprof.h"
 #include "src/gui/shell/toast.h"
@@ -2519,6 +2520,7 @@ int main(int argc, char **argv) {
 	logging_init();
 
 	printf("Starting sonix_player...\n");
+	bootprof_start();
 
 	// After logging_init and not before it: both of these say what they did,
 	// and anything printed before the log is holding output goes to whatever
@@ -2558,11 +2560,13 @@ int main(int argc, char **argv) {
 	bool first_start = stat(config_file, &config_st) != 0;
 #endif
 	config_init(config_file);
+	bootprof_mark("config_init");
 
 	// A start by the cable is the charging screen alone, until the power key is
 	// held: before anything else opens the display, the keys or the audio.
 	chargescreen_run_if_wanted();
 	chargescreen_mark(CHARGESCREEN_MARK_STARTED);
+	bootprof_mark("chargescreen");
 
 #ifndef HOST_BUILD
 	// Before the card is mounted and before either radio starts.
@@ -2593,11 +2597,13 @@ int main(int argc, char **argv) {
 	// it somewhere else for the host build, the same way SONIX_CONFIG does.
 	const char *lang_dir = getenv("SONIX_LANG_DIR");
 	lang_init(lang_dir && lang_dir[0] ? lang_dir : LANG_DIR);
+	bootprof_mark("ebook config, lang_init");
 	// The playback mode (repeat/shuffle) as it was left. Restored before the
 	// GUI builds, so the repeat button is born showing the right icon.
 	playlist_set_mode((playback_mode_t)config_get_int("player", "playback_mode", 0));
 	// The equalizer's bands and switch, before any playback can start.
 	eq_init();
+	bootprof_mark("eq_init");
 	// Gapless playback, before anything can start: the engine reads this at
 	// the end of every track.
 	audio_set_gapless(config_get_int("audio", "gapless", 0) != 0);
@@ -2610,12 +2616,14 @@ int main(int argc, char **argv) {
 	// What the three side keys do: the table is read once here, and the key
 	// threads consult it on every press.
 	keymap_init();
+	bootprof_mark("clock, adb, headset, keymap");
 
 	// Which player this is. Before the display, because on the simulator the
 	// window opens at the panel size of the model named in the file; on the
 	// device the framebuffer answers that question itself and this is read for
 	// the update file's name, the converter's name and the serial number.
 	sysinfo_load();
+	bootprof_mark("sysinfo_load");
 
 	// The streaming services' application keys, and Qobuz with them. Before
 	// the GUI builds its pages, because the Qobuz page is drawn one way or
@@ -2624,8 +2632,10 @@ int main(int argc, char **argv) {
 	qobuz_init();
 	tidal_init();
 	lastfm_init();
+	bootprof_mark("streamkeys, qobuz, tidal, lastfm");
 
 	lv_init();
+	bootprof_mark("lv_init");
 
 	// lv_init() seeds its generator with a literal (0x1234ABCD), so without
 	// this the sequence is the same on every boot -- and lv_rand() picks the
@@ -2662,6 +2672,7 @@ int main(int argc, char **argv) {
 	// requests, because it doubles as the hotplug manager. Replacing it means
 	// taking over that job, which is what manage_mount does; the player still
 	// stays out of the way if it finds the card already mounted.
+	bootprof_mark("display, boot animation start");
 	storage_config_t storage_cfg = {
 		// Both NULL: the player probes the block devices and the mount-point
 		// names the stock firmware uses and reports what it found in the log.
@@ -2700,6 +2711,7 @@ int main(int argc, char **argv) {
 	};
 
 	system_start_services(&system_cfg, post_gui_popup, NULL);
+	bootprof_mark("system_start_services");
 
 #ifndef HOST_BUILD
 	logging_attach_sd(storage_sd_root());
@@ -2708,6 +2720,7 @@ int main(int argc, char **argv) {
 	// previous run, which is the only place a SIGKILL leaves a trace.
 	logging_report_previous_run();
 #endif
+	bootprof_mark("log to card, previous run");
 
 	// The panel: the model, not the framebuffer. See panel_size().
 	int panel_w = 0, panel_h = 0;
@@ -2747,6 +2760,7 @@ int main(int argc, char **argv) {
 	// interface points at is filled in here, from /usr/resource/sonix/fonts through
 	// FreeType -- the stock player's own mechanism. Without default.otf there
 	// is no drawing so much as an error message, so that is fatal.
+	bootprof_mark("panel size");
 	if (!fonts_init()) {
 #ifdef HOST_BUILD
 		fprintf(stderr, "fonts: no default.otf in usr/resource/sonix/fonts or assets/fonts --\n"
@@ -2758,6 +2772,7 @@ int main(int argc, char **argv) {
 #endif
 	}
 
+	bootprof_mark("fonts_init");
 	gui_config_t gui_cfg = {
 		.screen_width = (uint32_t)panel_w,
 		.screen_height = (uint32_t)panel_h,
@@ -2776,6 +2791,7 @@ int main(int argc, char **argv) {
 	// Artwork thumbnails are kept on the card, next to the music, so that
 	// browsing a library only ever decodes each cover once -- the same trick
 	// the stock player uses with its own .hiby/.../cache folder.
+	bootprof_arm(gui_cfg.sd_root_path);
 	cover_set_cache_dir(gui_cfg.sd_root_path);
 	profiler_set_notify(profiler_notify);
 	profiler_start(gui_cfg.sd_root_path);
@@ -2797,6 +2813,7 @@ int main(int argc, char **argv) {
 	mseb_presets_set_dir(gui_cfg.sd_root_path);
 	eq_presets_set_dir(gui_cfg.sd_root_path);
 	peq_presets_set_dir(gui_cfg.sd_root_path);
+	bootprof_mark("cover, profiler, waveform, playlists");
 
 	// The music index, beside the thumbnails. Same schema as the stock
 	// player's, so the two can read each other's database.
@@ -2820,6 +2837,7 @@ int main(int argc, char **argv) {
 		char db_path[600];
 		snprintf(db_path, sizeof(db_path), "%s/.local/library.db", db_root);
 		library_open(db_path);
+		bootprof_mark("library_open");
 		// The same file the app downloads: one index, served as it is.
 		sonixlink_set_db_path(db_path);
 
@@ -2832,9 +2850,11 @@ int main(int argc, char **argv) {
 		// The audiobook index lives beside it, in its own file.
 		snprintf(db_path, sizeof(db_path), "%s/.local/audiobooks.db", db_root);
 		audiobookdb_open(db_path);
+		bootprof_mark("audiobookdb_open");
 
 		// And the radio's own: the starred stations and the last few played.
 		radio_store_open(db_root);
+		bootprof_mark("radio_store_open");
 	}
 
 	// TLS, so an https:// station can be opened at all. Warmed up here rather
@@ -2870,6 +2890,7 @@ int main(int argc, char **argv) {
 	// rather than to the local database.
 	library_forget_under(qobuzcache_dir());
 	library_forget_under(tidalcache_dir());
+	bootprof_mark("cache roots, forget stream rows");
 	// OpenSSL is loaded on a worker below the interface: the libraries and the
 	// certificate bundle take a quarter of a second on this core, and nothing
 	// needs them until a stream is opened, which waits on the loader's lock.
@@ -2883,10 +2904,12 @@ int main(int argc, char **argv) {
 	// and returns at once; if a switch was on, the bring-up happens on that
 	// worker while the interface carries on drawing.
 	wifi_init();
+	bootprof_mark("wifi_init");
 	// Before the radio, so a bring-up that fails is in the Bluetooth log from
 	// its first line.
 	btlog_init();
 	bluetooth_init();
+	bootprof_mark("bluetooth_init");
 	// Its worker starts here but stays idle: no socket is opened until the
 	// switch is on, which the same config read decides.
 	sonixlink_init();
@@ -2895,6 +2918,7 @@ int main(int argc, char **argv) {
 	// audiobook and podcast pages read their switch and their wheels while
 	// they are built, and read before this they all say off, 0 minutes.
 	sleeptimer_init();
+	bootprof_mark("sonixlink, sleeptimer");
 
 	gui_init(&gui_cfg);
 
@@ -2909,6 +2933,7 @@ int main(int argc, char **argv) {
 	// lands on it rather than on a CS43198 nobody is listening to.
 	usbaudio_init();
 	usbaudio_poll();
+	bootprof_mark("rotate, usbaudio");
 
 	// "Remember volume": the saved levels replace audio_init's default. Every
 	// output's, not only the one in use, because which output is in force at
@@ -2970,6 +2995,7 @@ int main(int argc, char **argv) {
 	// The media player bluez shows to the headphones. After gui_init, because
 	// the transport commands it receives are sent onto the GUI thread; it does
 	// nothing at all until Bluetooth is switched on.
+	bootprof_mark("volume and track restore");
 	btplayer_init();
 
 	// The status LED: aqua from power-on, exactly like the stock firmware.
@@ -3020,11 +3046,13 @@ int main(int argc, char **argv) {
 	power_set_double_tap_wake(config_get_int("screen", "double_tap_wake", 0) != 0);
 
 	power_init(&power_cfg, disp);
+	bootprof_mark("btplayer, led, usb, power_init");
 
 	// Charge limit, automatic shutdown and standby, as they were left. The
 	// screen timeout is the Screen page's setting and comes from there.
 	powersettings_apply();
 	settings_apply_screen_off();
+	bootprof_mark("power settings applied");
 
 #ifndef HOST_BUILD
 	// Bluetooth off. A firmware whose /etc/init.d/S80_bt_init has not been
@@ -3074,16 +3102,21 @@ int main(int argc, char **argv) {
 #ifndef HOST_BUILD
 	lock_code_start();
 #endif
+	bootprof_mark("watchdog, profilers, lock_code_start");
 
 #ifndef HOST_BUILD
 	bootanim_wait();
 #endif
+	bootprof_mark("bootanim_wait");
 	printf("Entering main event loop...\n");
 	while (running) {
 		ui_heartbeat++;
 		frameprof_pass_begin();
 		uint32_t time_till_next = lv_timer_handler();
 		frameprof_pass_end();
+		if (!bootprof_reported) {
+			bootprof_first_pass();
+		}
 		wakeprof_pass_end();
 		power_keep_animations_paused();
 		power_align_standby_timers();

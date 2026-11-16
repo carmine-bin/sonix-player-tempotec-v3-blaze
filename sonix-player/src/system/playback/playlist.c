@@ -1,5 +1,6 @@
 #include "playlist.h"
 
+#include "src/system/core/bootprof.h"
 #include "src/system/core/config.h"
 #include "src/system/library/cue.h"
 #include "src/system/library/folderorder.h"
@@ -179,7 +180,7 @@ static void persist_album(void) {
 		return;
 	}
 	snprintf(persisted_album, sizeof(persisted_album), "%s", queue_album);
-	library_queue_save_album(queue_album);
+	BOOTPROF_CALL("library_queue_save_album", library_queue_save_album(queue_album));
 }
 
 void playlist_set_album(const char *album) {

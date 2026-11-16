@@ -20,6 +20,7 @@
 #include "src/gui/bluetooth/btaudio.h"
 #include "src/gui/bluetooth/btsettings.h"
 #include "src/gui/shell/confirm.h"
+#include "src/system/core/bootprof.h"
 #include "src/system/core/wakeprof.h"
 #include "src/gui/shell/corners.h"
 #include "src/gui/settings/bootlogopage.h"
@@ -625,7 +626,15 @@ static void power_menu_async_cb(void *unused) {
 void gui_notify_power_menu(void) { gui_post(power_menu_async_cb, NULL); }
 
 
+// One page built, and a mark for where the start went (bootprof.h).
+#define BUILD(init)                                                                                                    \
+	do {                                                                                                               \
+		init(cfg);                                                                                                     \
+		bootprof_mark(#init);                                                                                          \
+	} while (0)
+
 void gui_init(gui_config_t *cfg) {
+	bootprof_group("gui");
 	// Colours first: every screen below styles itself from the active palette.
 	theme_init();
 
@@ -685,97 +694,99 @@ void gui_init(gui_config_t *cfg) {
 	flappybird_screen = lv_obj_create(NULL);
 	metronomepage_screen = lv_obj_create(NULL);
 
+	bootprof_mark("theme, the empty screens");
+
 	// Persistent topbar that stays above every screen.
-	topbar_init(cfg);
+	BUILD(topbar_init);
 
 	// Persistent back button that hides when on the main page
-	back_btn_init(cfg);
+	BUILD(back_btn_init);
 
 	// Before the settings pages: the display page draws its screensaver switch
 	// from screensaver_get_enabled(), which is only true once this has read the
 	// config. Built the other way round, a screensaver saved as on comes up
 	// showing an off switch.
-	screensaver_init(cfg);
+	BUILD(screensaver_init);
 
 	// The rounded screen corners, if they are on: above everything, including
 	// the screensaver, which is why they live on the system layer.
-	corners_init(cfg);
+	BUILD(corners_init);
 
-	main_menu_init(cfg);
+	BUILD(main_menu_init);
 
-	music_init(cfg);
-	coverflow_init(cfg);
+	BUILD(music_init);
+	BUILD(coverflow_init);
 
 	// wireless section: the two radio pages first, so the section's tiles
 	// have somewhere to point and the control centre's round buttons have a
 	// page to open on a long press.
-	wifisettings_init(cfg);
-	wifitransfer_page_init(cfg); // after wifisettings: its "no Wi-Fi" row points there
-	airplay_page_init(cfg);		 // likewise
-	dlna_page_init(cfg);		 // likewise: its "no Wi-Fi" row points there too
-	sonixlink_page_init(cfg);	 // likewise
-	airpodspage_init(cfg);		 // before btaudio: its AirPods row points at this page
-	btaudio_init(cfg);			 // before btsettings: its gear points at this page
-	btreceiverpage_init(cfg);	 // likewise, for the button beside the gear
-	btsettings_init(cfg);
-	wireless_init(cfg);
+	BUILD(wifisettings_init);
+	BUILD(wifitransfer_page_init); // after wifisettings: its "no Wi-Fi" row points there
+	BUILD(airplay_page_init);		 // likewise
+	BUILD(dlna_page_init);		 // likewise: its "no Wi-Fi" row points there too
+	BUILD(sonixlink_page_init);	 // likewise
+	BUILD(airpodspage_init);		 // before btaudio: its AirPods row points at this page
+	BUILD(btaudio_init);			 // before btsettings: its gear points at this page
+	BUILD(btreceiverpage_init);	 // likewise, for the button beside the gear
+	BUILD(btsettings_init);
+	BUILD(wireless_init);
 
 	// streaming section: three services that are not implemented yet, so the
 	// page exists and is walkable but its tiles say so when tapped.
 	// radio before the section, so its tile has somewhere to point.
-	radiopage_init(cfg);
-	dacpage_init(cfg);
+	BUILD(radiopage_init);
+	BUILD(dacpage_init);
 	// After dacpage: the More section points at its pages.
-	gearboyplay_init(cfg);  // before the list: one of its rows leads here
-	gearboysettings_init(cfg); // before the page: its gear opens this
-	gearboypage_init(cfg);
-	flappybird_init(cfg);
-	metronomepage_init(cfg);
+	BUILD(gearboyplay_init);  // before the list: one of its rows leads here
+	BUILD(gearboysettings_init); // before the page: its gear opens this
+	BUILD(gearboypage_init);
+	BUILD(flappybird_init);
+	BUILD(metronomepage_init);
 	// before morepage: the books tile opens the shelf, and the shelf opens the
 	// reader.
-	ebookreader_init(cfg);
+	BUILD(ebookreader_init);
 	// before ebookpage: its corner button opens the bookmarks
-	ebookmarkspage_init(cfg);
-	ebooksettings_init(cfg); // likewise: the other corner button opens this
-	ebookpage_init(cfg);
-	morepage_init(cfg);
-	textview_init(cfg);	 // before filespage: a text file tapped there opens here
-	imageview_init(cfg); // likewise, for a picture
-	filespage_init(cfg);
-	streaming_init(cfg);
+	BUILD(ebookmarkspage_init);
+	BUILD(ebooksettings_init); // likewise: the other corner button opens this
+	BUILD(ebookpage_init);
+	BUILD(morepage_init);
+	BUILD(textview_init);	 // before filespage: a text file tapped there opens here
+	BUILD(imageview_init); // likewise, for a picture
+	BUILD(filespage_init);
+	BUILD(streaming_init);
 
-	player_init(cfg);
+	BUILD(player_init);
 
-	browser_init(cfg);
+	BUILD(browser_init);
 
 	// remap_init before settings_init: the key-remap row carries the pointer to
 	// its screen, which has to exist already. The control centre's order page
 	// is reached from the same page and has to exist for the same reason.
-	remap_init(cfg);
-	ccsettings_init(cfg);
-	kblayoutpage_init(cfg); // the keyboard-language row on the same page
-	settings_init(cfg);
-	devoptions_init(cfg);
-	processespage_init(cfg); // the processes page the devoptions entry opens
+	BUILD(remap_init);
+	BUILD(ccsettings_init);
+	BUILD(kblayoutpage_init); // the keyboard-language row on the same page
+	BUILD(settings_init);
+	BUILD(devoptions_init);
+	BUILD(processespage_init); // the processes page the devoptions entry opens
 	// after devoptions: the system entry opens the page that can unlock it
-	systempage_init(cfg);
-	bootlogopage_init(cfg); // before appearance: its row carries the screen
-	appearance_init(cfg);
-	language_init(cfg);
-	libraryscan_init(cfg);
-	msebsettings_init(cfg); // before musicsettings: the MSEB page hangs its gear off it
-	eqsettings_init(cfg);	// and the equalizer page hangs its own off this
-	peqsettings_init(cfg); // the parametric page hangs its preset screen off the gear
-	peqautoeq_init(cfg);  // the waveform entry on that page searches AutoEq profiles
-	musicsettings_init(cfg);
-	search_init(cfg);
-	medialist_init(cfg);
-	playlistpage_init(cfg);
-	audiobookextras_init(cfg); // the bookmarks and summary pages
-	audiobooks_init(cfg);
-	chapters_init(cfg);
-	lyricsearch_init(cfg);
-	trackmenu_init(cfg);
+	BUILD(systempage_init);
+	BUILD(bootlogopage_init); // before appearance: its row carries the screen
+	BUILD(appearance_init);
+	BUILD(language_init);
+	BUILD(libraryscan_init);
+	BUILD(msebsettings_init); // before musicsettings: the MSEB page hangs its gear off it
+	BUILD(eqsettings_init);	// and the equalizer page hangs its own off this
+	BUILD(peqsettings_init); // the parametric page hangs its preset screen off the gear
+	BUILD(peqautoeq_init);  // the waveform entry on that page searches AutoEq profiles
+	BUILD(musicsettings_init);
+	BUILD(search_init);
+	BUILD(medialist_init);
+	BUILD(playlistpage_init);
+	BUILD(audiobookextras_init); // the bookmarks and summary pages
+	BUILD(audiobooks_init);
+	BUILD(chapters_init);
+	BUILD(lyricsearch_init);
+	BUILD(trackmenu_init);
 
 	// The leftward swipe that pulls the player in works on the browsing pages
 	// -- menu, library lists, file browser -- but NOT on the settings pages
@@ -816,12 +827,14 @@ void gui_init(gui_config_t *cfg) {
 		switcher_attach_back_gesture(back_swipe_screens[i]);
 	}
 
-	quickpanel_init(cfg); // above the pages, under the popover/power menu
+	bootprof_mark("swipe gestures");
+	BUILD(quickpanel_init); // above the pages, under the popover/power menu
 	popover_init(); // last: its veil must sit above the other top-layer chrome
-	powersettings_init(cfg);
-	confirm_init(cfg);
-	toast_init(cfg);
-	lowbattery_init(cfg);
+	bootprof_mark("popover_init");
+	BUILD(powersettings_init);
+	BUILD(confirm_init);
+	BUILD(toast_init);
+	BUILD(lowbattery_init);
 
 	// The screensaver is drawn both when the panel goes dark (so the wake opens
 	// on it rather than on the page) and when it lights up again; and the
@@ -892,17 +905,17 @@ void gui_init(gui_config_t *cfg) {
 	}
 
 	// The other kind of notice: the one that stays until it is over.
-	modal_init(cfg);
+	BUILD(modal_init);
 
 	// Volume HUD and the power menu, both above every page.
-	volume_overlay_init(cfg);
-	powermenu_init(cfg);
+	BUILD(volume_overlay_init);
+	BUILD(powermenu_init);
 
 	// On a first boot the clock panel comes straight up over everything else:
 	// with no network and an RTC that has never been written, the player has no
 	// way to know the time, and nothing it timestamps can be trusted until it
 	// does.
-	timeset_init(cfg);
+	BUILD(timeset_init);
 
 	// A player that has never run asks two questions, in this order: which
 	// language, then what time it is. That way the clock panel is already in
@@ -910,8 +923,8 @@ void gui_init(gui_config_t *cfg) {
 	// language you cannot read is a poor way to meet a device. Confirming the
 	// language brings the clock up itself, so the two only chain here on the
 	// path where the language has already been answered before.
-	welcome_init(cfg);
-	setupwifi_init(cfg); // the step between the language and the clock
+	BUILD(welcome_init);
+	BUILD(setupwifi_init); // the step between the language and the clock
 
 	// Ahead of everything else, and only on a device that has never been booted:
 	// the greeting. Its button opens the language picker itself, which in turn
@@ -923,4 +936,6 @@ void gui_init(gui_config_t *cfg) {
 	}
 
 	switch_screen(main_menu_screen);
+	bootprof_mark("popup, the rest of gui_init");
+	bootprof_group("main");
 }

@@ -191,11 +191,15 @@ GB_LDFLAGS = -static-libstdc++ -static-libgcc
 # (frameprof.c) can name the callback the time went to.
 TIMER_WRAP = -Wl,--wrap=lv_timer_create -Wl,--wrap=lv_timer_set_cb -Wl,--wrap=lv_obj_add_event_cb \
 			 -Wl,--wrap=lv_obj_remove_event_cb
-HOST_LDFLAGS = $(TIMER_WRAP) $(shell sdl2-config --libs) -lpthread -lm -ldl -lasound $(shell pkg-config --libs freetype2) \
+# Three LVGL functions with a shortcut in front of them, for the cost of
+# building pages: src/gui/shell/lvglfast.c says which and why.
+LVGL_FAST_WRAP = -Wl,--wrap=lv_display_send_event -Wl,--wrap=lv_obj_get_display \
+				 -Wl,--wrap=lv_text_ap_strlen -Wl,--wrap=lv_text_ap_proc
+HOST_LDFLAGS = $(TIMER_WRAP) $(LVGL_FAST_WRAP) $(shell sdl2-config --libs) -lpthread -lm -ldl -lasound $(shell pkg-config --libs freetype2) \
 			   $(shell pkg-config --libs opusfile wavpack)
 #
 # --gc-sections: the other half of -ffunction-sections (see TARGET_CFLAGS).
-TARGET_LDFLAGS = $(TIMER_WRAP) $(FREETYPE_PREFIX)/lib/libfreetype.a $(AUDIO_LIBS) -lpthread -lm -ldl -lasound \
+TARGET_LDFLAGS = $(TIMER_WRAP) $(LVGL_FAST_WRAP) $(FREETYPE_PREFIX)/lib/libfreetype.a $(AUDIO_LIBS) -lpthread -lm -ldl -lasound \
 				 $(GB_LDFLAGS) -Wl,--gc-sections
 
 # FreeType for the target, built static: the rootfs has no libfreetype.so. The

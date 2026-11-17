@@ -4,11 +4,10 @@
 #include <string.h>
 #include <time.h>
 
-// One entry per block fed, a ring the interface reads behind. Blocks are a
-// period long (about 40 ms on the Blaze), so 128 of them are five seconds: far
-// more than the output buffer holds, which is how far ahead of the reader the
-// writer ever gets.
-#define BLOCKS 128
+// One entry per 20 ms slice of a block fed (see SLICE_MS), a ring the interface
+// reads behind: 512 of them are ten seconds, far more than the output buffer
+// holds, which is how far ahead of the reader the writer ever gets.
+#define BLOCKS 512
 
 typedef struct {
 	uint32_t heard_at_ms;
@@ -80,67 +79,61 @@ static void samples_done(int frame_count, int rate) {
 	samples_rate = rate;
 }
 
-void levelmeter_feed_s16(const int16_t *frames, int frame_count, int channels, int rate) {
-	if (!frames || frame_count <= 0 || channels < 1 || channels > 2 || !reader_here()) {
-		return;
-	}
-	block_t b = {.heard_at_ms = heard_at(rate), .frames = frame_count, .channels = channels, .rate = rate};
-	int peak[2] = {0, 0};
-	double sq[2] = {0, 0};
-	uint32_t at = samples_written;
-	for (int i = 0; i < frame_count; i++) {
-		int mono = 0;
-		for (int c = 0; c < channels; c++) {
-			int v = frames[i * channels + c];
-			int a = v < 0 ? -v : v;
-			if (a > peak[c]) {
-				peak[c] = a;
-			}
-			sq[c] += (double)v * v;
-			mono += v;
-		}
-		samples[(at + (uint32_t)i) % SAMPLES] = (int16_t)(mono / channels);
-	}
-	for (int c = 0; c < channels; c++) {
-		b.peak[c] = (float)peak[c] / 32768.0f;
-		b.sumsq[c] = (float)(sq[c] / (32768.0 * 32768.0));
-		b.clipped |= peak[c] >= 32767;
-	}
-	publish(&b);
+// Each block is published in slices of about 20 ms, every slice stamped with
+// when it will be heard. A block is an output period -- 93 ms at 44.1 kHz on
+// the Blaze -- and published whole, the meter moved ten times a second, in
+// visible jumps however often the page was drawn.
+#define SLICE_MS 20
+
+#define FEED_BODY(SAMPLE_T, ABS_T, FULL_SCALE, CLIP_AT, TO_MONO)                                                      \
+	if (!frames || frame_count <= 0 || channels < 1 || channels > 2 || !reader_here()) {                                \
+		return;                                                                                                        \
+	}                                                                                                                  \
+	uint32_t start = heard_at(rate);                                                                                   \
+	int slice = rate > 0 ? rate * SLICE_MS / 1000 : frame_count;                                                       \
+	if (slice < 64) {                                                                                                  \
+		slice = 64;                                                                                                    \
+	}                                                                                                                  \
+	uint32_t at = samples_written;                                                                                     \
+	for (int from = 0; from < frame_count; from += slice) {                                                            \
+		int n = frame_count - from < slice ? frame_count - from : slice;                                               \
+		block_t b = {.heard_at_ms = start + (rate > 0 ? (uint32_t)((uint64_t)from * 1000u / (unsigned)rate) : 0u),    \
+					 .frames = n,                                                                                      \
+					 .channels = channels,                                                                             \
+					 .rate = rate};                                                                                    \
+		ABS_T peak[2] = {0, 0};                                                                                        \
+		double sq[2] = {0, 0};                                                                                         \
+		for (int i = from; i < from + n; i++) {                                                                        \
+			ABS_T mono = 0;                                                                                            \
+			for (int c = 0; c < channels; c++) {                                                                       \
+				ABS_T v = (SAMPLE_T)frames[i * channels + c];                                                          \
+				ABS_T av = v < 0 ? -v : v;                                                                             \
+				if (av > peak[c]) {                                                                                    \
+					peak[c] = av;                                                                                      \
+				}                                                                                                      \
+				double d = (double)v;                                                                                  \
+				sq[c] += d * d;                                                                                        \
+				mono += v;                                                                                             \
+			}                                                                                                          \
+			samples[(at + (uint32_t)i) % SAMPLES] = (int16_t)(TO_MONO);                                                \
+		}                                                                                                              \
+		for (int c = 0; c < channels; c++) {                                                                           \
+			b.peak[c] = (float)((double)peak[c] / (FULL_SCALE));                                                       \
+			b.sumsq[c] = (float)(sq[c] / ((FULL_SCALE) * (FULL_SCALE)));                                               \
+			b.clipped |= peak[c] >= (CLIP_AT);                                                                         \
+		}                                                                                                              \
+		publish(&b);                                                                                                   \
+	}                                                                                                                  \
 	samples_done(frame_count, rate);
+
+void levelmeter_feed_s16(const int16_t *frames, int frame_count, int channels, int rate) {
+	FEED_BODY(int16_t, int, 32768.0, 32767, mono / channels)
 }
 
+// The output stage clamps to the top of the range; a 24-bit DAC is fed the top
+// 24 bits, so anything within the last 8 is that clamp.
 void levelmeter_feed_s32(const int32_t *frames, int frame_count, int channels, int rate) {
-	if (!frames || frame_count <= 0 || channels < 1 || channels > 2 || !reader_here()) {
-		return;
-	}
-	block_t b = {.heard_at_ms = heard_at(rate), .frames = frame_count, .channels = channels, .rate = rate};
-	int64_t peak[2] = {0, 0};
-	double sq[2] = {0, 0};
-	uint32_t at = samples_written;
-	for (int i = 0; i < frame_count; i++) {
-		int64_t mono = 0;
-		for (int c = 0; c < channels; c++) {
-			int64_t v = frames[i * channels + c];
-			int64_t a = v < 0 ? -v : v;
-			if (a > peak[c]) {
-				peak[c] = a;
-			}
-			double d = (double)v;
-			sq[c] += d * d;
-			mono += v;
-		}
-		samples[(at + (uint32_t)i) % SAMPLES] = (int16_t)((mono / channels) >> 16);
-	}
-	for (int c = 0; c < channels; c++) {
-		b.peak[c] = (float)((double)peak[c] / 2147483648.0);
-		b.sumsq[c] = (float)(sq[c] / (2147483648.0 * 2147483648.0));
-		// The output stage clamps to the top of the range; a 24-bit DAC is
-		// fed the top 24 bits, so anything within the last 8 is that clamp.
-		b.clipped |= peak[c] >= (int64_t)INT32_MAX - 255;
-	}
-	publish(&b);
-	samples_done(frame_count, rate);
+	FEED_BODY(int32_t, int64_t, 2147483648.0, (int64_t)INT32_MAX - 255, (mono / channels) >> 16)
 }
 
 bool levelmeter_read(levelmeter_reading_t *out) {

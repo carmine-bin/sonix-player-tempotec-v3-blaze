@@ -19,7 +19,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define FRAME_MS 40 // 25 a second: the panel runs at 45, a meter needs no more
+#define FRAME_MS 33 // 30 a second: the panel runs at 45, and the meter now has new data every 20 ms
 #define IDLE_MS 500 // the check while the page is not on screen
 #define CLIP_HOLD_MS 2000
 #define PEAK_HOLD_MS 1500
@@ -349,90 +349,83 @@ static void line(lv_layer_t *layer, float x1, float y1, float x2, float y2, int3
 	lv_draw_line(layer, &dsc);
 }
 
-// Where `vu` sits on a VU's printed scale, 0..1. The scale is linear in
-// voltage, which is why 0 VU is two thirds of the way across and -20 is
-// crowded at the left.
-static float vu_pos(float vu) {
-	float lo = powf(10.0f, VU_MIN / 20.0f), hi = powf(10.0f, VU_MAX / 20.0f);
-	float v = powf(10.0f, fminf(fmaxf(vu, VU_MIN - 3.0f), VU_MAX + 0.5f) / 20.0f);
-	return (v - lo) / (hi - lo);
+// The VU as two arc gauges, in the look of the rest of the interface: a track
+// of three quarters of a circle open at the bottom, filled in the accent up to
+// 0 VU and in amber past it, a tick at 0, and the reading written large in the
+// middle. Linear in dB, the way every other figure on this page is.
+#define GAUGE_START_DEG 135.0f // LVGL's angles: 0 at three o'clock, clockwise
+#define GAUGE_SWEEP_DEG 270.0f
+
+static void arc(lv_layer_t *layer, int32_t cx, int32_t cy, int32_t r, float from_deg, float to_deg, int32_t width,
+				lv_color_t color, lv_opa_t opa) {
+	if (to_deg - from_deg < 0.5f) {
+		return;
+	}
+	lv_draw_arc_dsc_t dsc;
+	lv_draw_arc_dsc_init(&dsc);
+	dsc.center.x = cx;
+	dsc.center.y = cy;
+	dsc.radius = (uint16_t)r;
+	dsc.start_angle = (lv_value_precise_t)from_deg;
+	dsc.end_angle = (lv_value_precise_t)to_deg;
+	dsc.width = width;
+	dsc.rounded = 1;
+	dsc.color = color;
+	dsc.opa = opa;
+	lv_draw_arc(layer, &dsc);
 }
 
-#define DIAL_SWEEP_DEG 90.0f // the needle's travel, -20 to +3
+static float gauge_frac(float vu) { return fminf(fmaxf((vu - VU_MIN) / (VU_MAX - VU_MIN), 0.0f), 1.0f); }
 
-static const lv_color_t DIAL_FACE = LV_COLOR_MAKE(238, 228, 200); // the old cream
-static const lv_color_t DIAL_INK = LV_COLOR_MAKE(30, 28, 24);
-static const lv_color_t DIAL_RED = LV_COLOR_MAKE(196, 36, 30);
+static void gauge(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2, float vu, const char *name) {
+	lv_color_t ink = lv_color_white();
+	int32_t w = x2 - x1 + 1, h = y2 - y1 + 1;
+	int32_t width = ui_px(10);
+	// The open bottom of the circle is where the name goes, so the gauge may
+	// be a little taller than the space would otherwise allow.
+	int32_t r = LV_MIN(w, h * 6 / 5) / 2 - width / 2 - ui_px(2);
+	int32_t cx = x1 + w / 2, cy = y1 + width / 2 + ui_px(2) + r;
+	float zero = gauge_frac(0.0f), f = gauge_frac(vu);
+	float a0 = GAUGE_START_DEG, a_zero = a0 + GAUGE_SWEEP_DEG * zero, a_val = a0 + GAUGE_SWEEP_DEG * f;
 
-// The angle of a point of the scale, 0..1, in radians from straight up.
-static float dial_angle(float pos) { return (-DIAL_SWEEP_DEG / 2.0f + pos * DIAL_SWEEP_DEG) * (float)M_PI / 180.0f; }
-
-// One dial, drawn as the meters on an old deck are: the scale on an arc round
-// a pivot just below the face, the figures above the ticks, the red band from
-// 0 to +3 along the inside, and the needle at `vu`.
-static void dial(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2, float vu, const char *name) {
-	rect(layer, x1, y1, x2, y2, DIAL_FACE, LV_OPA_COVER, ui_px(8));
-	float w = (float)(x2 - x1 + 1), h = (float)(y2 - y1 + 1);
-	float cx = (float)x1 + w / 2.0f;
-	// Half the sweep's chord within 0.35 of the width, the end figures inside the face, and the arc's top a
-	// third of the way down, which leaves the figures room above it.
-	float r = fminf(w * 0.35f / sinf(DIAL_SWEEP_DEG * 0.5f * (float)M_PI / 180.0f), h * 0.85f);
-	float py = (float)y1 + h * 0.34f + r;
-
-	static const float TICKS[] = {-20, -10, -7, -5, -3, -2, -1, 0, 1, 2, 3};
-	static const char *const NAMES[] = {"20", "10", "7", "5", "3", "", "", "0", "", "", "3"};
-	const lv_font_t *f = &font_ui_14;
-	for (size_t i = 0; i < sizeof(TICKS) / sizeof(TICKS[0]); i++) {
-		float ang = dial_angle(vu_pos(TICKS[i]));
-		float sn = sinf(ang), cs = cosf(ang);
-		bool red = TICKS[i] > 0.0f;
-		bool major = NAMES[i][0] != '\0';
-		float r2 = r * (major ? 1.09f : 1.06f);
-		line(layer, cx + sn * r, py - cs * r, cx + sn * r2, py - cs * r2, ui_px(2), red ? DIAL_RED : DIAL_INK);
-		if (major) {
-			float rt = r * 1.09f + (float)f->line_height * 0.62f;
-			int32_t tx = (int32_t)(cx + sn * rt), ty = (int32_t)(py - cs * rt) - f->line_height / 2;
-			text(layer, NAMES[i], f, tx - ui_px(12), ty, tx + ui_px(12), LV_TEXT_ALIGN_CENTER, red ? DIAL_RED : DIAL_INK,
-				 LV_OPA_COVER);
-		}
+	arc(layer, cx, cy, r, a0, a0 + GAUGE_SWEEP_DEG, width, ink, LV_OPA_20);
+	arc(layer, cx, cy, r, a0, fminf(a_val, a_zero), width, theme()->accent, LV_OPA_COVER);
+	if (a_val > a_zero) {
+		arc(layer, cx, cy, r, a_zero, a_val, width, HOT_AMBER, LV_OPA_COVER);
 	}
-	// The scale's own line, and the red band under it from 0 to +3: short
-	// straight pieces, which at this size read as the arc.
-	const int PIECES = 24;
-	for (int k = 0; k < PIECES; k++) {
-		float a0 = dial_angle((float)k / PIECES), a1 = dial_angle((float)(k + 1) / PIECES);
-		line(layer, cx + sinf(a0) * r, py - cosf(a0) * r, cx + sinf(a1) * r, py - cosf(a1) * r, ui_px(1), DIAL_INK);
-	}
-	float z = vu_pos(0.0f);
-	for (int k = 0; k < 6; k++) {
-		float a0 = dial_angle(z + (1.0f - z) * (float)k / 6.0f), a1 = dial_angle(z + (1.0f - z) * (float)(k + 1) / 6.0f);
-		float rr = r * 0.95f;
-		line(layer, cx + sinf(a0) * rr, py - cosf(a0) * rr, cx + sinf(a1) * rr, py - cosf(a1) * rr, ui_px(4), DIAL_RED);
-	}
-	const lv_font_t *bf = &font_ui_18;
-	int32_t ly = (int32_t)(py - r * 0.50f) - bf->line_height / 2;
-	text(layer, "VU", bf, x1, ly, x2, LV_TEXT_ALIGN_CENTER, DIAL_INK, LV_OPA_COVER);
-	text(layer, name, f, x1 + ui_px(8), y2 - f->line_height - ui_px(4), x1 + ui_px(30), LV_TEXT_ALIGN_LEFT, DIAL_INK,
-		 LV_OPA_70);
+	// The tick at 0 VU, just outside the track.
+	float t = a_zero * (float)M_PI / 180.0f;
+	float r1 = (float)r + (float)width / 2.0f + (float)ui_px(3), r2 = r1 + (float)ui_px(7);
+	line(layer, (float)cx + cosf(t) * r1, (float)cy + sinf(t) * r1, (float)cx + cosf(t) * r2, (float)cy + sinf(t) * r2,
+		 ui_px(2), ink);
 
-	// The needle, from where it comes into the face to just past the scale.
-	float ang = dial_angle(vu_pos(vu));
-	float sn = sinf(ang), cs = cosf(ang);
-	float from = fmaxf(0.0f, (py - (float)y2 + 1.0f) / fmaxf(cs, 0.2f));
-	float to = r * 1.07f;
-	line(layer, cx + sn * from, py - cs * from, cx + sn * to, py - cs * to, ui_px(2), DIAL_INK);
+	// The reading, and what it is.
+	const lv_font_t *big = &font_ui_28;
+	const lv_font_t *small = &font_ui_16;
+	char buf[16];
+	if (vu <= VU_MIN + 0.05f) {
+		snprintf(buf, sizeof(buf), "--");
+	} else {
+		snprintf(buf, sizeof(buf), "%+.1f", (double)fminf(vu, VU_MAX + 0.9f));
+	}
+	int32_t ty = cy - big->line_height / 2 - ui_px(4);
+	text(layer, buf, big, cx - r, ty, cx + r, LV_TEXT_ALIGN_CENTER, ink, LV_OPA_COVER);
+	text(layer, "VU", small, cx - r, ty + big->line_height, cx + r, LV_TEXT_ALIGN_CENTER, ink, LV_OPA_60);
+	// The channel, in the gap at the bottom.
+	int32_t ny = cy + (int32_t)((float)r * 0.70f) - small->line_height / 2;
+	text(layer, name, &font_ui_18, cx - ui_px(20), ny, cx + ui_px(20), LV_TEXT_ALIGN_CENTER, ink, LV_OPA_80);
 }
 
 static void draw_dials(lv_layer_t *layer, int32_t x1, int32_t top, int32_t x2, int32_t bottom) {
-	int32_t gap = ui_px(10);
+	int32_t gap = ui_px(16);
 	int32_t w = (x2 - x1 + 1 - gap) / 2;
 	int32_t h = bottom - top + 1;
-	if (h > w * 9 / 10) {
-		h = w * 9 / 10;
+	if (h > w) {
+		h = w;
 	}
 	int32_t y1 = top + (bottom - top + 1 - h) / 2;
-	dial(layer, x1, y1, x1 + w - 1, y1 + h - 1, shown_db[0], "L");
-	dial(layer, x1 + w + gap, y1, x1 + 2 * w + gap - 1, y1 + h - 1, shown_db[1], "R");
+	gauge(layer, x1, y1, x1 + w - 1, y1 + h - 1, shown_db[0], "L");
+	gauge(layer, x1 + w + gap, y1, x1 + 2 * w + gap - 1, y1 + h - 1, shown_db[1], "R");
 }
 
 static void draw_spectrum(lv_layer_t *layer, int32_t x1, int32_t top, int32_t x2, int32_t bottom) {

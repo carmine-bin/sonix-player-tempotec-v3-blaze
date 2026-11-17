@@ -39,6 +39,7 @@ static size_t open_heap;
 // Since the kernel started, which is what the monotonic clock counts on Linux.
 static uint64_t start_wall_us;
 static uint64_t start_cpu_us;
+static uint64_t process_cpu_at_start_us; // other threads only: this one's share is taken off
 static bool started;
 static pthread_t start_thread;
 
@@ -64,6 +65,7 @@ static void open_stretch(void) {
 void bootprof_start(void) {
 	start_wall_us = clock_us(CLOCK_MONOTONIC);
 	start_cpu_us = clock_us(CLOCK_THREAD_CPUTIME_ID);
+	process_cpu_at_start_us = clock_us(CLOCK_PROCESS_CPUTIME_ID) - start_cpu_us;
 	start_thread = pthread_self();
 	started = true;
 	open_stretch();
@@ -144,6 +146,11 @@ static void report(void) {
 		(double)start_wall_us / 1e6, (double)(end_wall_us - start_wall_us) / 1e6);
 	say(file, "interface thread: %.2f s on the CPU of those %.2f s", (double)(end_cpu_us - start_cpu_us) / 1e6,
 		(double)(end_wall_us - start_wall_us) / 1e6);
+	// The rest of the player in the same stretch -- the boot animation's
+	// decoder, the workers the services start -- which on one core is time the
+	// interface thread waited for.
+	say(file, "the player's other threads: %.2f s on the CPU so far",
+		(double)(clock_us(CLOCK_PROCESS_CPUTIME_ID) - (end_cpu_us - start_cpu_us) - process_cpu_at_start_us) / 1e6);
 	say(file, "%-5s %-36s %9s %9s %9s %9s", "group", "what", "at ms", "wall ms", "cpu ms", "heap KB");
 
 	uint64_t at_us = 0;

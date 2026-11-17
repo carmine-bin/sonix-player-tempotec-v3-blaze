@@ -1911,9 +1911,14 @@ static void fb_pan_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *
 // The animation plays on a thread while the rest of the start-up runs: it is
 // ~5 s of sleeping between frames, and inline it held the first frame back by
 // that much. Nothing draws to the framebuffer until the main loop's first
-// flush, so it only has to be over by then (bootanim_wait).
+// flush, so it only has to be over by then -- and it is ended there
+// (bootanim_finish) rather than waited for: measured on the Blaze, the
+// interface is ready 3.6 s after the player starts and the animation ran until
+// 5.4 s, so 1.8 s of every start were spent looking at it with everything
+// already built.
 static pthread_t bootanim_thread;
 static bool bootanim_running;
+static int bootanim_frames;
 static struct {
 	uint16_t *fb;
 	int w, h;
@@ -1921,7 +1926,7 @@ static struct {
 
 static void *bootanim_thread_func(void *arg) {
 	(void)arg;
-	bootanim_play(bootanim_args.fb, bootanim_args.w, bootanim_args.h);
+	bootanim_frames = bootanim_play(bootanim_args.fb, bootanim_args.w, bootanim_args.h);
 	return NULL;
 }
 
@@ -1935,11 +1940,12 @@ static void bootanim_start(uint16_t *fb, int w, int h) {
 	}
 }
 
-static void bootanim_wait(void) {
+static void bootanim_finish(void) {
 	if (bootanim_running) {
+		bootanim_stop();
 		pthread_join(bootanim_thread, NULL);
 		bootanim_running = false;
-		printf("bootanim: done before the first frame\n");
+		printf("bootanim: ended for the first frame after %d frames\n", bootanim_frames);
 	}
 }
 
@@ -3105,9 +3111,9 @@ int main(int argc, char **argv) {
 	bootprof_mark("watchdog, profilers, lock_code_start");
 
 #ifndef HOST_BUILD
-	bootanim_wait();
+	bootanim_finish();
 #endif
-	bootprof_mark("bootanim_wait");
+	bootprof_mark("bootanim_finish");
 	printf("Entering main event loop...\n");
 	while (running) {
 		ui_heartbeat++;

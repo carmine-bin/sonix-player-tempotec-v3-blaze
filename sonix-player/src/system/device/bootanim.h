@@ -13,9 +13,16 @@
 // (the frames are 240x60, laid exactly over the mark in logo.jpeg), once and
 // before the interface exists, so it is the one thing in startup that waits
 // for something other than work. A single pass of 125 frames, about five
-// seconds.
+// seconds -- or less: the interface is ready well before that, and the
+// animation is what the screen shows until it is, not something to sit through
+// afterwards. bootanim_stop() ends it at the frame it is on.
 //
 // fb is the mapped framebuffer, RGB565, panel_w x panel_h with a tight stride.
-void bootanim_play(uint16_t *fb, int panel_w, int panel_h);
+// Returns the number of frames drawn.
+int bootanim_play(uint16_t *fb, int panel_w, int panel_h);
+
+// From another thread: the frame being drawn is the last. bootanim_play()
+// returns within one frame's time, 40 ms.
+void bootanim_stop(void);
 
 #endif // BOOTANIM_H

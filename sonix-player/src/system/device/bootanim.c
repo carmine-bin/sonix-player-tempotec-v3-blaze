@@ -1,5 +1,6 @@
 #include "bootanim.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -32,24 +33,29 @@ static unsigned char *read_file(const char *path, long *size) {
 	return buf;
 }
 
-void bootanim_play(uint16_t *fb, int panel_w, int panel_h) {
+static volatile sig_atomic_t stop_asked;
+
+void bootanim_stop(void) { stop_asked = 1; }
+
+int bootanim_play(uint16_t *fb, int panel_w, int panel_h) {
 	struct timespec next;
 	clock_gettime(CLOCK_MONOTONIC, &next);
 
-	for (int i = 0; i < FRAME_MAX; i++) {
+	int i;
+	for (i = 0; i < FRAME_MAX && !stop_asked; i++) {
 		char path[96];
 		snprintf(path, sizeof(path), FRAME_DIR "/%d.png", i);
 		long size;
 		unsigned char *file = read_file(path, &size);
 		if (!file) {
-			return;
+			break;
 		}
 		int w, h, n;
 		// 4 channels: the first frame is a palette PNG, the rest plain RGB.
 		unsigned char *px = stbi_load_from_memory(file, (int)size, &w, &h, &n, 4);
 		free(file);
 		if (!px) {
-			return;
+			break;
 		}
 		if (ORIGIN_X + w <= panel_w && ORIGIN_Y + h <= panel_h) {
 			for (int y = 0; y < h; y++) {
@@ -71,4 +77,5 @@ void bootanim_play(uint16_t *fb, int panel_w, int panel_h) {
 		}
 		clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
 	}
+	return i;
 }

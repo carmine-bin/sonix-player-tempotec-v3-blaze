@@ -1320,14 +1320,32 @@ void musicsettings_set_mseb_enabled(bool enabled) {
 static lv_obj_t *eq_row, *peq_row, *mseb_row, *soundfield_row, *crossfeed_row, *fade_row, *balance_row, *vlimit_row;
 
 static void refresh_active_chevrons(void) {
-	settingsrow_chevron_active(eq_row, eq_get_enabled());
-	settingsrow_chevron_active(peq_row, peq_get_enabled());
-	settingsrow_chevron_active(mseb_row, mseb_get_enabled());
-	settingsrow_chevron_active(soundfield_row, soundfield_get_enabled());
-	settingsrow_chevron_active(crossfeed_row, crossfeed_get_enabled());
+	// With Direct on none of the effects is acting, whatever its switch says:
+	// the chevrons say what the sound is going through.
+	bool through = !direct_get_enabled();
+	settingsrow_chevron_active(eq_row, through && eq_get_enabled());
+	settingsrow_chevron_active(peq_row, through && peq_get_enabled());
+	settingsrow_chevron_active(mseb_row, through && mseb_get_enabled());
+	settingsrow_chevron_active(soundfield_row, through && soundfield_get_enabled());
+	settingsrow_chevron_active(crossfeed_row, through && crossfeed_get_enabled());
 	settingsrow_chevron_active(fade_row, musicsettings_fade_enabled());
-	settingsrow_chevron_active(balance_row, balance_get_enabled());
+	settingsrow_chevron_active(balance_row, through && balance_get_enabled());
 	settingsrow_chevron_active(vlimit_row, volume_limit_enabled());
+}
+
+// Direct (eq.h), above the effects it bypasses.
+static lv_obj_t *direct_switch;
+
+static void direct_refresh(void) {
+	if (direct_switch) {
+		lv_obj_set_state(direct_switch, LV_STATE_CHECKED, direct_get_enabled());
+	}
+}
+
+static void direct_toggle_cb(lv_event_t *e) {
+	(void)e;
+	direct_set_enabled(lv_obj_has_state(direct_switch, LV_STATE_CHECKED));
+	refresh_active_chevrons();
 }
 
 static void screen_loaded_cb(lv_event_t *e) {
@@ -1336,6 +1354,7 @@ static void screen_loaded_cb(lv_event_t *e) {
 	// Back from either page: the chevron follows what was left switched on.
 	refresh_active_chevrons();
 	lineout_refresh();
+	direct_refresh();
 }
 
 // The row asks which folders first; the scan page opens only from there,
@@ -2083,6 +2102,10 @@ void musicsettings_init(gui_config_t *cfg) {
 
 	lastfmsettings_init(cfg);
 	settingsrow_add(container, "lastfm", NULL, switch_screen_cb, lastfmsettings_screen());
+
+	settingsrow_toggle(container, "musicsettings_direct", &direct_switch, direct_toggle_cb);
+	direct_refresh();
+	option_note(container, "musicsettings_direct_note");
 
 	build_eq_page(cfg);
 	eq_row = settingsrow_add(container, "equaliser", NULL, switch_screen_cb, eq_screen);

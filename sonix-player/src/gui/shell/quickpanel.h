@@ -71,6 +71,8 @@ typedef enum {
 	// (alsa-controls.h). One more button than the grid has places, which the
 	// layout already allows for: the ones left out are a list of their own.
 	QP_BTN_VOLUME_LOCK,
+	// Direct (eq.h): every effect and ReplayGain bypassed while it is lit.
+	QP_BTN_DIRECT,
 	QP_BTN_COUNT,
 	QP_BTN_NONE = QP_BTN_COUNT, // an empty place in the grid
 } quickpanel_button_t;

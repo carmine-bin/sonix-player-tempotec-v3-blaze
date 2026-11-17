@@ -370,6 +370,20 @@ void crossfeed_reset(void);
 void crossfeed_process(short *frames, int frame_count, int channels, int sample_rate);
 void crossfeed_process_s32(int32_t *frames, int frame_count, int channels, int sample_rate);
 
+// ---------------------------------------------------------------------------
+// Direct: the decoded samples go to the output as they are.
+//
+// One switch over every other one in this file and ReplayGain's: with it on,
+// the graphic equaliser, the parametric, MSEB, soundfield, crossfeed, mono
+// and balance all pass the audio through untouched and no ReplayGain
+// correction is applied. Nothing else changes: each of them keeps its own
+// switch and its values, reports them as they were left, and is back the
+// moment Direct goes off. The DAC's own settings (filter, gain) are hardware
+// and are not part of it. Saved to the config.
+// ---------------------------------------------------------------------------
+void direct_set_enabled(bool enabled);
+bool direct_get_enabled(void);
+
 // Applies MSEB + the graphic EQ in place to interleaved signed 16-bit PCM,
 // with automatic pre-gain so boosted bands cannot clip. A no-op when both are
 // disabled/flat. Audio thread only.

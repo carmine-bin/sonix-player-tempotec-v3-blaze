@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "src/system/audio/replaygain.h"
 #include "src/system/core/config.h"
 
 // The classic ISO octave centres every 10-band graphic EQ uses (and the ten
@@ -65,6 +66,19 @@ static volatile int sf_width = SOUNDFIELD_WIDTH_DEFAULT;
 
 static volatile int bal_enabled;
 static volatile int mono_enabled;
+
+// ---------------------------------------------------------------------------
+// Direct -- see eq.h.
+//
+// Every `*_enabled` above and below is what the audio thread goes by. With
+// Direct on they are all zero, whatever the switches say; the switches
+// themselves are kept here, are what the config holds and what the getters
+// answer with, so the pages go on showing what will come back.
+// ---------------------------------------------------------------------------
+
+static volatile int direct_on;
+static volatile int eq_switch, mseb_switch, peq_switch, sf_switch, bal_switch, mono_switch, cf_switch;
+static void direct_apply(void);
 static volatile int bal_tenths;	  // -200..200, the slider's own value
 static volatile int bal_left_q15; // the two attenuations, 32768 = untouched
 static volatile int bal_right_q15;
@@ -290,17 +304,58 @@ void eq_init(void) {
 
 	peq_load();
 
+	eq_switch = eq_enabled;
+	mseb_switch = mseb_enabled;
+	peq_switch = peq_enabled;
+	sf_switch = sf_enabled;
+	bal_switch = bal_enabled;
+	mono_switch = mono_enabled;
+	cf_switch = cf_enabled;
+	direct_on = config_get_int("audio", "direct", 0) ? 1 : 0;
+	direct_apply();
+
 	settings_version++;
 }
 
-void eq_set_enabled(bool enabled) {
-	eq_enabled = enabled ? 1 : 0;
+// What the audio thread goes by, from the switches and Direct. The version is
+// bumped so the equalisers' chain is rebuilt the way it is when one of them is
+// switched by hand: same coefficients swap, same ramp of the level.
+static void direct_apply(void) {
+	int through = !direct_on;
+	bool crossfeed_back = through && cf_switch && !cf_enabled;
+	eq_enabled = through && eq_switch;
+	mseb_enabled = through && mseb_switch;
+	peq_enabled = through && peq_switch;
+	sf_enabled = through && sf_switch;
+	bal_enabled = through && bal_switch;
+	mono_enabled = through && mono_switch;
+	if (crossfeed_back) {
+		crossfeed_reset(); // as when its own switch brings it back
+	}
+	cf_enabled = through && cf_switch;
+	replaygain_set_bypass(direct_on != 0);
 	settings_version++;
-	config_set_int("eq", "enabled", eq_enabled);
+}
+
+void direct_set_enabled(bool enabled) {
+	direct_on = enabled ? 1 : 0;
+	direct_apply();
+	config_set_int("audio", "direct", direct_on);
+	config_save();
+	printf("audio: direct %s\n", direct_on ? "on -- every effect and ReplayGain bypassed" : "off");
+}
+
+bool direct_get_enabled(void) { return direct_on != 0; }
+
+void eq_set_enabled(bool enabled) {
+	eq_switch = enabled ? 1 : 0;
+	eq_enabled = eq_switch && !direct_on;
+	settings_version++;
+	config_set_int("eq", "enabled", eq_switch);
 	config_save();
 }
 
-bool eq_get_enabled(void) { return eq_enabled != 0; }
+bool eq_get_enabled(void) { return eq_switch != 0; }
 
 void eq_set_band(int band, int gain_db) {
 	if (band < 0 || band >= EQ_BANDS) {
@@ -339,13 +394,14 @@ const char *const mseb_band_name[MSEB_BANDS] = {
 };
 
 void mseb_set_enabled(bool enabled) {
-	mseb_enabled = enabled ? 1 : 0;
+	mseb_switch = enabled ? 1 : 0;
+	mseb_enabled = mseb_switch && !direct_on;
 	settings_version++;
-	config_set_int("mseb", "enabled", mseb_enabled);
+	config_set_int("mseb", "enabled", mseb_switch);
 	config_save();
 }
 
-bool mseb_get_enabled(void) { return mseb_enabled != 0; }
+bool mseb_get_enabled(void) { return mseb_switch != 0; }
 
 void mseb_set_value(int band, int value) {
 	if (band < 0 || band >= MSEB_BANDS) {
@@ -522,13 +578,14 @@ void eq_reset(void) {
 // ---------------------------------------------------------------------------
 
 void peq_set_enabled(bool enabled) {
-	peq_enabled = enabled ? 1 : 0;
+	peq_switch = enabled ? 1 : 0;
+	peq_enabled = peq_switch && !direct_on;
 	settings_version++;
-	config_set_int("peq", "enabled", peq_enabled);
+	config_set_int("peq", "enabled", peq_switch);
 	config_save();
 }
 
-bool peq_get_enabled(void) { return peq_enabled != 0; }
+bool peq_get_enabled(void) { return peq_switch != 0; }
 
 void peq_get_band(int index, peq_band_t *out) {
 	if (!out) {
@@ -2184,12 +2241,13 @@ void eq_process_s32(int32_t *frames, int frame_count, int channels, int sample_r
 // ---------------------------------------------------------------------------
 
 void soundfield_set_enabled(bool enabled) {
-	sf_enabled = enabled ? 1 : 0;
-	config_set_int("soundfield", "enabled", sf_enabled);
+	sf_switch = enabled ? 1 : 0;
+	sf_enabled = sf_switch && !direct_on;
+	config_set_int("soundfield", "enabled", sf_switch);
 	config_save();
 }
 
-bool soundfield_get_enabled(void) { return sf_enabled != 0; }
+bool soundfield_get_enabled(void) { return sf_switch != 0; }
 
 void soundfield_set_width(int hundredths) {
 	sf_width = clamp_width(hundredths);
@@ -2200,12 +2258,13 @@ void soundfield_set_width(int hundredths) {
 int soundfield_get_width(void) { return sf_width; }
 
 void balance_set_enabled(bool enabled) {
-	bal_enabled = enabled ? 1 : 0;
-	config_set_int("balance", "enabled", bal_enabled);
+	bal_switch = enabled ? 1 : 0;
+	bal_enabled = bal_switch && !direct_on;
+	config_set_int("balance", "enabled", bal_switch);
 	config_save();
 }
 
-bool balance_get_enabled(void) { return bal_enabled != 0; }
+bool balance_get_enabled(void) { return bal_switch != 0; }
 
 void balance_set_value(int tenths_db) {
 	balance_set_gains(clamp_balance(tenths_db));
@@ -2244,12 +2303,13 @@ void balance_process_s32(int32_t *frames, int frame_count, int channels) {
 }
 
 void mono_set_enabled(bool enabled) {
-	mono_enabled = enabled ? 1 : 0;
-	config_set_int("audio", "mono", mono_enabled);
+	mono_switch = enabled ? 1 : 0;
+	mono_enabled = mono_switch && !direct_on;
+	config_set_int("audio", "mono", mono_switch);
 	config_save();
 }
 
-bool mono_get_enabled(void) { return mono_enabled != 0; }
+bool mono_get_enabled(void) { return mono_switch != 0; }
 
 // The mean of the two channels, rounded towards zero: it cannot leave the
 // range of either.
@@ -2395,15 +2455,16 @@ void crossfeed_reset(void) {
 }
 
 void crossfeed_set_enabled(bool enabled) {
-	cf_enabled = enabled ? 1 : 0;
+	cf_switch = enabled ? 1 : 0;
+	cf_enabled = cf_switch && !direct_on;
 	if (cf_enabled) {
 		crossfeed_reset(); // no tail of the previous track when it comes back on
 	}
-	config_set_int("crossfeed", "enabled", cf_enabled);
+	config_set_int("crossfeed", "enabled", cf_switch);
 	config_save();
 }
 
-bool crossfeed_get_enabled(void) { return cf_enabled != 0; }
+bool crossfeed_get_enabled(void) { return cf_switch != 0; }
 
 void crossfeed_set_level(int percent) {
 	cf_level = clamp_step(percent, CROSSFEED_LEVEL_MIN, CROSSFEED_LEVEL_MAX, CROSSFEED_LEVEL_STEP);

@@ -471,6 +471,9 @@ test:
 	$(TEST_DIR)/wifi_selftest $(TEST_DIR)
 	$(CC) -O2 -Wall -I. tools/axpcharge_selftest.c -o $(TEST_DIR)/axpcharge_selftest
 	$(TEST_DIR)/axpcharge_selftest $(TEST_DIR) > $(TEST_DIR)/axpcharge_selftest.log
+	$(CC) -O2 -Wall -I. tools/direct_selftest.c src/system/audio/eq.c src/system/audio/replaygain.c \
+		src/system/core/config.c -lpthread -lm -o $(TEST_DIR)/direct_selftest
+	$(TEST_DIR)/direct_selftest $(TEST_DIR) > $(TEST_DIR)/direct_selftest.log 2>&1
 	@echo "test: all self-checks passed."
 
 # The flags every target object was compiled with, the optimisation levels

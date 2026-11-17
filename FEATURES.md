@@ -50,6 +50,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **Add to queue** - as the next track or at the end.
 - **Queue** - reorder it, select tracks in it, and see the **history** of what you played today, yesterday and before.
 - **Gapless** - no silence between tracks of the same album, also over Bluetooth.
+- **Direct mode** - one switch that bypasses the equaliser, PEQ, MSEB, soundfield, crossfeed, mono, balance and ReplayGain, so the decoded samples reach the DAC untouched. Each of them keeps its settings and comes back when you turn it off.
 - **Fade** - the end of a track fades into the next one, from 1 to 12 seconds.
 - **ReplayGain** - off, by track or by album, read from the tags.
 - **Remember track** - the queue and the position are still there after a restart. You can also open Now Playing straight away at startup.
@@ -166,7 +167,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 ## Control centre and status bar
 
-- Pull down from the status bar (or tap it) to open the **Control centre**: what is playing, brightness, and buttons for Wi-Fi, Bluetooth, AirPlay, DLNA, SonixLink, Wi-Fi transfer, EQ, PEQ, MSEB, Fade, Gapless, Gain, Line out, Volume lock and the three sleep timers.
+- Pull down from the status bar (or tap it) to open the **Control centre**: what is playing, brightness, and buttons for Wi-Fi, Bluetooth, AirPlay, DLNA, SonixLink, Wi-Fi transfer, EQ, PEQ, MSEB, Fade, Gapless, Gain, Line out, Volume lock, Direct mode and the three sleep timers.
 - Choose which buttons are shown and in what order.
 - The status bar shows the clock and the battery, and can stay on in Now Playing too.
 

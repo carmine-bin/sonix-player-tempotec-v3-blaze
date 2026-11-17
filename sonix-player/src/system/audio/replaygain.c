@@ -19,6 +19,7 @@
 // worst a torn read could do is apply the previous track's gain to one block.
 static volatile int gain_q15 = 32768;
 static volatile int active;
+static volatile int bypass; // Direct (eq.h): the correction is known and not applied
 static volatile double current_db;
 
 replaygain_mode_t replaygain_mode(void) {
@@ -104,12 +105,14 @@ void replaygain_load(const song_metadata_t *meta) {
 	printf("replaygain: %s %+.2f dB (peak %.4f)\n", mode == REPLAYGAIN_ALBUM ? "album" : "track", db, peak);
 }
 
-bool replaygain_active(void) { return active != 0; }
+bool replaygain_active(void) { return active != 0 && !bypass; }
+
+void replaygain_set_bypass(bool on) { bypass = on ? 1 : 0; }
 double replaygain_current_db(void) { return current_db; }
 
 void replaygain_process(short *frames, int frame_count, int channels) {
 	int g = gain_q15;
-	if (!active || g == 32768 || frame_count <= 0 || channels <= 0 || !frames) {
+	if (!active || bypass || g == 32768 || frame_count <= 0 || channels <= 0 || !frames) {
 		return;
 	}
 
@@ -130,7 +133,7 @@ void replaygain_process(short *frames, int frame_count, int channels) {
 
 void replaygain_process_s32(int32_t *frames, int frame_count, int channels) {
 	int64_t g = gain_q15;
-	if (!active || g == 32768 || frame_count <= 0 || channels <= 0 || !frames) {
+	if (!active || bypass || g == 32768 || frame_count <= 0 || channels <= 0 || !frames) {
 		return;
 	}
 

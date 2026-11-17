@@ -40,6 +40,10 @@ void replaygain_load(const song_metadata_t *meta);
 // What is being applied right now, in dB, and whether anything is. For the
 // interface to be able to say so.
 bool replaygain_active(void);
+
+// Direct (eq.h): the correction stays loaded for each track and is not applied
+// while this is on, and replaygain_active() answers no.
+void replaygain_set_bypass(bool on);
 double replaygain_current_db(void);
 
 // In place on interleaved PCM, audio thread only. A no-op when off or when the

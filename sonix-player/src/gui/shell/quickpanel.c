@@ -99,6 +99,7 @@ static lv_obj_t *sleep_podcast_btn;
 static lv_obj_t *wifi_transfer_btn;
 static lv_obj_t *gapless_btn;
 static lv_obj_t *volume_lock_btn;
+static lv_obj_t *direct_btn;
 
 // ---------------------------------------------------------------------------
 // Which buttons the panel carries, and where
@@ -134,6 +135,7 @@ static const char *const button_key[QP_BTN_COUNT] = {
 	[QP_BTN_WIFI_TRANSFER] = "wifi_transfer",
 	[QP_BTN_GAPLESS] = "gapless",
 	[QP_BTN_VOLUME_LOCK] = "volume_lock",
+	[QP_BTN_DIRECT] = "direct",
 };
 
 static const char *const button_tag[QP_BTN_COUNT] = {
@@ -154,6 +156,7 @@ static const char *const button_tag[QP_BTN_COUNT] = {
 	[QP_BTN_WIFI_TRANSFER] = "wifitransfer_title",
 	[QP_BTN_GAPLESS] = "musicsettings_gapless_playback",
 	[QP_BTN_VOLUME_LOCK] = "quickpanel_volume_lock",
+	[QP_BTN_DIRECT] = "musicsettings_direct",
 };
 
 static uint8_t slots[QP_SLOT_COUNT];  // the grid, QP_BTN_NONE where it is empty
@@ -1056,12 +1059,12 @@ static void order_load(void) {
 		}
 		// Crossfade, which the migration below is taking out on purpose, and the
 		// buttons that arrive into a panel already holding eight: DLNA, the three
-		// sleep timers, Wi-Fi transfer, gapless and the volume lock. Appending
-		// them would change a panel nobody asked to change, so they wait among
-		// the unused ones, where the settings page shows them.
+		// sleep timers, Wi-Fi transfer, gapless, the volume lock and Direct.
+		// Appending them would change a panel nobody asked to change, so they
+		// wait among the unused ones, where the settings page shows them.
 		bool waits = i == QP_BTN_DLNA || i == QP_BTN_SLEEP_MUSIC || i == QP_BTN_SLEEP_AUDIOBOOK ||
 					 i == QP_BTN_SLEEP_PODCAST || i == QP_BTN_WIFI_TRANSFER || i == QP_BTN_GAPLESS ||
-					 i == QP_BTN_VOLUME_LOCK;
+					 i == QP_BTN_VOLUME_LOCK || i == QP_BTN_DIRECT;
 		if ((saved_version < 2 && i == QP_BTN_FADE) || waits) {
 			hidden[hidden_n++] = (uint8_t)i;
 		} else {
@@ -1182,6 +1185,8 @@ static lv_obj_t *button_widget(quickpanel_button_t which) {
 		return gapless_btn;
 	case QP_BTN_VOLUME_LOCK:
 		return volume_lock_btn;
+	case QP_BTN_DIRECT:
+		return direct_btn;
 	default:
 		return NULL;
 	}
@@ -1398,6 +1403,8 @@ const lv_image_dsc_t *quickpanel_button_icon(quickpanel_button_t button) {
 		return &icon_gapless_on_quick;
 	case QP_BTN_VOLUME_LOCK:
 		return &icon_volume_lock_quick;
+	case QP_BTN_DIRECT:
+		return &icon_direct_quick;
 	default:
 		return &icon_wifi;
 	}
@@ -1515,6 +1522,7 @@ static void refresh_audio_buttons(void) {
 	}
 	circle_button_set_on(gapless_btn, gapless);
 	circle_button_set_on(volume_lock_btn, volume_lock_enabled());
+	circle_button_set_on(direct_btn, direct_get_enabled());
 }
 
 // After a button has switched something: the circles repaint, and the page
@@ -1871,6 +1879,19 @@ static void volume_lock_clicked_cb(lv_event_t *e) {
 	toggled();
 }
 
+// Direct (eq.h): a tap flips it, a hold opens the music page, where its switch
+// sits above the effects it bypasses. The effects' own buttons stay as they
+// are: they show what comes back.
+static void direct_clicked_cb(lv_event_t *e) {
+	(void)e;
+	if (long_press_consumed) {
+		long_press_consumed = false;
+		return;
+	}
+	direct_set_enabled(!direct_get_enabled());
+	toggled();
+}
+
 static void gain_clicked_cb(lv_event_t *e) {
 	(void)e;
 	if (long_press_consumed) {
@@ -2103,6 +2124,10 @@ void quickpanel_init(gui_config_t *cfg) {
 
 	volume_lock_btn = make_circle_button(row, &icon_volume_lock_quick);
 	lv_obj_add_event_cb(volume_lock_btn, volume_lock_clicked_cb, LV_EVENT_CLICKED, NULL);
+
+	direct_btn = make_circle_button(row, &icon_direct_quick);
+	lv_obj_add_event_cb(direct_btn, direct_clicked_cb, LV_EVENT_CLICKED, NULL);
+	lv_obj_add_event_cb(direct_btn, open_page_cb, LV_EVENT_LONG_PRESSED, musicsettings_screen);
 
 	bright_row = lv_obj_create(controls_card);
 	lv_obj_set_size(bright_row, lv_pct(100), BRIGHT_ROW_H);

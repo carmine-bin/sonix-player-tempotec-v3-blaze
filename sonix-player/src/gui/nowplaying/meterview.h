@@ -14,7 +14,7 @@
 // on one of the two names along the bottom shows that one, and a tap anywhere
 // else moves to the other:
 //
-//   Spectrum  twenty bands from 60 Hz up, a 1024-point FFT of the mono sum,
+//   Spectrum  24 bands from 40 Hz to 20 kHz, a 2048-point FFT of the mono sum,
 //             -66..0 dB, falling 20 dB a second, a cap over each band held a
 //             moment. Above it a thin peak bar per channel, -48..0 dBFS, rising
 //             at once and falling 24 dB in 2.8 s, with the highest of the last
@@ -30,9 +30,10 @@
 //
 // The page shown is saved in the config (Music > Now Playing picks it too);
 // whether the page is up lasts while the player runs, as the lyrics' does.
-// It is measured only while the page is on screen: the player open, the screen
-// on. Otherwise its timer slows to a check every half second and the playback
-// thread stops measuring.
+// The playback thread measures while the player is open (or the page is up)
+// and the screen on, so the page has the music ready the moment it comes in;
+// it is drawn only while it is on screen. Otherwise the timer slows down and
+// the measuring stops.
 
 typedef enum {
 	METER_SPECTRUM = 0,

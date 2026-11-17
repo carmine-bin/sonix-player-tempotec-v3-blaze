@@ -5624,7 +5624,10 @@ void player_sheet_attach_drag(lv_obj_t *obj, bool opening) {
 // drawn now, as the lyrics are. Not while the player is away or the lyrics are
 // up.
 static bool meter_where(lv_area_t *rel) {
-	if (!sheet_open || lyrics_now || lyrics_progress > 0 || !cover_panel) {
+	// Not while the lyrics are up. The player being away is not a reason:
+	// the page goes and comes back with it (meterview.c measures only while
+	// it is open).
+	if (lyrics_now || lyrics_progress > 0 || !cover_panel) {
 		return false;
 	}
 	lv_area_t panel, base;

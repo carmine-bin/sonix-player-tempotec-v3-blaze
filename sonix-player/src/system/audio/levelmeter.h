@@ -51,7 +51,7 @@ bool levelmeter_read(levelmeter_reading_t *out);
 
 // The interface: the `count` mono samples being heard now, -1..1, oldest first,
 // and the rate they were played at. False when there is not that much yet.
-#define LEVELMETER_SPECTRUM_SAMPLES 1024
+#define LEVELMETER_SPECTRUM_SAMPLES 2048
 bool levelmeter_read_samples(float *out, int count, int *sample_rate);
 
 #endif /* LEVELMETER_H */

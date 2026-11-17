@@ -32,11 +32,12 @@
 #define VU_MAX (3.0f)
 #define VU_TAU_S 0.065f // 99% of a step in 300 ms
 
-#define BANDS 20
+#define BANDS 24
 #define SPEC_FLOOR_DB (-66.0f)
 #define SPEC_FALL_DB_S 20.0f
-#define SPEC_LOW_HZ 60.0f
-#define SPEC_HIGH_HZ 16000.0f
+#define SPEC_LOW_HZ 40.0f
+#define SPEC_HIGH_HZ 20000.0f // or under Nyquist, at 44.1 kHz just under it
+static float spec_top_hz = SPEC_HIGH_HZ; // the top band's edge, for the labels
 #define FFT_N LEVELMETER_SPECTRUM_SAMPLES
 
 // The page's slide, as the lyrics': 0 the sleeve, FULL the meter.
@@ -195,6 +196,7 @@ static bool spectrum_now(float *db) {
 	}
 	fft(fft_re, fft_im, FFT_N);
 	float top = fminf(SPEC_HIGH_HZ, (float)rate * 0.45f);
+	spec_top_hz = top;
 	float bin_hz = (float)rate / (float)FFT_N;
 	float ratio = powf(top / SPEC_LOW_HZ, 1.0f / BANDS);
 	float lo = SPEC_LOW_HZ;
@@ -475,11 +477,25 @@ static void draw_spectrum(lv_layer_t *layer, int32_t x1, int32_t top, int32_t x2
 			}
 		}
 	}
+	// The frequencies, under the bands they fall in, as Lotoo marks them.
 	int32_t ly = bottom - small->line_height;
-	text(layer, "60", small, x1, ly, x1 + ui_px(60), LV_TEXT_ALIGN_LEFT, ink, LV_OPA_70);
-	text(layer, "1k", small, (x1 + x2) / 2 - ui_px(30), ly, (x1 + x2) / 2 + ui_px(30), LV_TEXT_ALIGN_CENTER, ink,
-		 LV_OPA_70);
-	text(layer, "16k", small, x2 - ui_px(60), ly, x2, LV_TEXT_ALIGN_RIGHT, ink, LV_OPA_70);
+	static const float AT[] = {50, 300, 1000, 3000, 10000, 20000};
+	static const char *const NAME[] = {"50", "300", "1k", "3k", "10k", "20k"};
+	float lr = logf(spec_top_hz / SPEC_LOW_HZ) / BANDS;
+	for (int i = 0; i < 6; i++) {
+		float hz = fminf(AT[i], spec_top_hz);
+		int b = (int)(logf(hz / SPEC_LOW_HZ) / lr);
+		b = b < 0 ? 0 : b >= BANDS ? BANDS - 1 : b;
+		int32_t mid = x1 + b * (bw + gap) + bw / 2;
+		int32_t lx1 = mid - ui_px(20), lx2 = mid + ui_px(20);
+		lv_text_align_t al = LV_TEXT_ALIGN_CENTER;
+		if (i == 0) {
+			lx1 = x1 - ui_px(4), lx2 = x1 + ui_px(36), al = LV_TEXT_ALIGN_LEFT;
+		} else if (i == 5) {
+			lx1 = x2 - ui_px(36), lx2 = x2 + ui_px(4), al = LV_TEXT_ALIGN_RIGHT;
+		}
+		text(layer, NAME[i], small, lx1, ly, lx2, al, ink, LV_OPA_70);
+	}
 }
 
 static void draw_cb(lv_event_t *e) {
@@ -824,10 +840,18 @@ static uint32_t frame_signature(void) {
 // The frame
 // ---------------------------------------------------------------------------
 
+// While the player is open the playback thread keeps measuring even with the
+// page down. What is heard now was written a third of a second ago, so a
+// meter that only asked once its page came in had nothing to show for that
+// long; measured all along, it is ready the moment the page is.
+#define WARM_MS 250
+// With the page up and the player away: how soon it notices the player back.
+#define AWAY_MS 100
+
 static void tick_cb(lv_timer_t *t) {
 	bool allowed = place();
 	if (!allowed) {
-		// Away with the player, the page goes too, and comes back with it.
+		// Lyrics over the sleeve: the page goes.
 		if (progress > 0) {
 			lv_anim_delete(page, progress_exec);
 			progress_apply(0);
@@ -835,14 +859,25 @@ static void tick_cb(lv_timer_t *t) {
 	} else if (up_wanted && progress == 0 && !lv_anim_get(page, progress_exec)) {
 		progress_apply(FULL);
 	}
-	if (progress == 0 || !power_screen_is_on()) {
-		levelmeter_set_wanted(false);
-		lv_timer_set_period(t, IDLE_MS);
+	// The page stays put while the player is pushed away and pulled back, so
+	// it comes back in with the player instead of after it.
+	// Measured while the player is open, and while the page is up with the
+	// player pushed away -- so it has the music ready when the player comes
+	// back -- but only with the screen on; drawn only with the player open.
+	bool screen = power_screen_is_on();
+	bool warm = screen && (player_sheet_is_open() || progress > 0);
+	bool draw = screen && player_sheet_is_open() && progress > 0;
+	levelmeter_set_wanted(warm);
+	if (!draw) {
+		if (warm) {
+			levelmeter_reading_t drain;
+			levelmeter_read(&drain); // keeps the feed alive, and the ring current
+		}
+		lv_timer_set_period(t, warm ? WARM_MS : progress > 0 ? AWAY_MS : IDLE_MS);
 		last_tick = 0;
 		return;
 	}
 	lv_timer_set_period(t, FRAME_MS);
-	levelmeter_set_wanted(true);
 	if (look_cb && progress == FULL) {
 		set_ground(look_cb(FULL, lv_area_get_height(&placed))); // the blur may have arrived since
 	}

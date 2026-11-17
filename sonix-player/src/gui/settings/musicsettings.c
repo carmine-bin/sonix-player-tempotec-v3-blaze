@@ -1849,10 +1849,10 @@ static void build_library_page(gui_config_t *cfg) {
 // ---------------------------------------------------------------------------
 
 // The level meter on the sleeve (meterview.h).
-static lv_obj_t *meter_pill[4];
+static lv_obj_t *meter_pill[METER_MODES];
 
 static void meter_refresh(void) {
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < METER_MODES; i++) {
 		if (meter_pill[i]) {
 			settingsrow_pill_active(meter_pill[i], (int)meterview_mode() == i);
 		}
@@ -1895,9 +1895,9 @@ static void build_nowplaying_page(gui_config_t *cfg) {
 	// The sleeve's colour as the accent of the other two arrangements too.
 	lv_obj_t *meter_pills = NULL;
 	settingsrow_pills(container, "musicsettings_meter", &meter_pills);
-	static const char *const METER_NAMES[4] = {"musicsettings_meter_off", "musicsettings_meter_peak",
-											   "musicsettings_meter_vu", "musicsettings_meter_spectrum"};
-	for (int i = 0; i < 4; i++) {
+	static const char *const METER_NAMES[METER_MODES] = {"musicsettings_meter_peak", "musicsettings_meter_vu",
+														 "musicsettings_meter_spectrum"};
+	for (int i = 0; i < METER_MODES; i++) {
 		meter_pill[i] = settingsrow_pill(meter_pills, METER_NAMES[i], i, meter_pick_cb);
 	}
 	meter_refresh();

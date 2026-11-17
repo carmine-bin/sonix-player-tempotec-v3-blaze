@@ -1,17 +1,21 @@
 #include "meterview.h"
 
 #include "src/gui/fonts/fonts.h"
+#include "src/gui/nowplaying/player.h"
+#include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/gui/shell/uiscale.h"
 #include "src/system/audio/levelmeter.h"
 #include "src/system/core/config.h"
+#include "src/system/core/lang.h"
 #include "src/system/device/power.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
-#define FRAME_MS 40	 // 25 a second: the panel runs at 45, a meter needs no more
-#define IDLE_MS 500	 // the check while it is not on screen
+#define FRAME_MS 40 // 25 a second: the panel runs at 45, a meter needs no more
+#define IDLE_MS 500 // the check while the page is not on screen
 #define CLIP_HOLD_MS 2000
 #define PEAK_HOLD_MS 1500
 
@@ -30,13 +34,25 @@
 #define SPEC_HIGH_HZ 16000.0f
 #define FFT_N LEVELMETER_SPECTRUM_SAMPLES
 
-static lv_obj_t *band;
+// The page's slide, as the lyrics': 0 the sleeve, FULL the meter.
+#define FULL 1000
+#define SLIDE_MS 220
+#define DRAG_PX ui_px(14)
+#define COMMIT_FRACTION 4 // a quarter of the sleeve's height commits the swipe
+
+static lv_obj_t *page;
 static lv_timer_t *timer;
 static bool (*where_cb)(lv_area_t *rel);
 static meter_mode_t mode;
 static bool mode_loaded;
 
-// What is drawn, in dB, after the ballistics.
+static int32_t progress; // where the page is
+static bool up_wanted;	 // brought in, and not put away since
+static bool swiped;		 // the release that ends a swipe is not a tap
+static lv_area_t placed; // the sleeve, relative to the panel
+static bool placed_valid;
+
+// What is drawn, after the ballistics.
 static float shown_db[2] = {PEAK_FLOOR_DB, PEAK_FLOOR_DB};
 static float hold_db[2] = {PEAK_FLOOR_DB, PEAK_FLOOR_DB};
 static uint32_t hold_at[2];
@@ -52,12 +68,11 @@ static float spec_db[BANDS];
 static uint32_t clip_at;
 static bool clip_seen;
 static uint32_t last_tick;
-static lv_area_t placed;
 
 meter_mode_t meterview_mode(void) {
 	if (!mode_loaded) {
-		long v = config_get_int("screen", "meter", METER_OFF);
-		mode = (v >= METER_OFF && v <= METER_SPECTRUM) ? (meter_mode_t)v : METER_OFF;
+		long v = config_get_int("screen", "meter_mode", METER_PEAK);
+		mode = (v >= 0 && v < METER_MODES) ? (meter_mode_t)v : METER_PEAK;
 		mode_loaded = true;
 	}
 	return mode;
@@ -77,13 +92,15 @@ static void reset_ballistics(void) {
 void meterview_set_mode(meter_mode_t m) {
 	meterview_mode();
 	mode = m;
-	config_set_int("screen", "meter", (long)m);
+	config_set_int("screen", "meter_mode", (long)m);
 	config_save();
 	reset_ballistics();
-	if (timer) {
-		lv_timer_ready(timer);
+	if (page) {
+		lv_obj_invalidate(page);
 	}
 }
+
+bool meterview_is_up(void) { return progress > 0; }
 
 static float to_db(float lin) { return lin > 1e-6f ? 20.0f * log10f(lin) : -120.0f; }
 
@@ -248,16 +265,17 @@ static void rect(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int32_t 
 	lv_draw_rect(layer, &dsc, &a);
 }
 
-static void text(lv_layer_t *layer, const char *s, int32_t x1, int32_t y1, int32_t x2, lv_text_align_t align,
-				 lv_color_t color) {
+static void text(lv_layer_t *layer, const char *s, const lv_font_t *font, int32_t x1, int32_t y1, int32_t x2,
+				 lv_text_align_t align, lv_color_t color, lv_opa_t opa) {
 	lv_draw_label_dsc_t dsc;
 	lv_draw_label_dsc_init(&dsc);
 	dsc.text = s;
-	dsc.font = &font_ui_14;
+	dsc.text_local = 1; // some are built on the stack
+	dsc.font = font;
 	dsc.color = color;
-	dsc.opa = LV_OPA_80;
+	dsc.opa = opa;
 	dsc.align = align;
-	lv_area_t a = {x1, y1, x2, y1 + font_ui_14.line_height};
+	lv_area_t a = {x1, y1, x2, y1 + font->line_height};
 	lv_draw_label(layer, &dsc, &a);
 }
 
@@ -265,74 +283,57 @@ static const lv_color_t CLIP_RED = LV_COLOR_MAKE(224, 27, 36);
 static const lv_color_t HOT_AMBER = LV_COLOR_MAKE(245, 180, 40);
 
 // One horizontal bar from `lo` to `hi` (dB or VU), filled to `value`, with the
-// part past `hot` in amber.
+// part past `hot` in amber and a line at `hold`.
 static void hbar(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2, float lo, float hi, float hot,
 				 float value, float hold) {
 	int32_t w = x2 - x1 + 1;
-	rect(layer, x1, y1, x2, y2, lv_color_white(), LV_OPA_20, ui_px(3));
+	rect(layer, x1, y1, x2, y2, lv_color_white(), LV_OPA_20, ui_px(4));
 	float f = fminf(fmaxf((value - lo) / (hi - lo), 0.0f), 1.0f);
 	float fh = fminf(fmaxf((hot - lo) / (hi - lo), 0.0f), 1.0f);
 	int32_t end = x1 + (int32_t)(f * (float)w) - 1;
 	int32_t hot_x = x1 + (int32_t)(fh * (float)w);
-	rect(layer, x1, y1, end < hot_x - 1 ? end : hot_x - 1, y2, theme()->accent, LV_OPA_COVER, ui_px(3));
+	rect(layer, x1, y1, end < hot_x - 1 ? end : hot_x - 1, y2, theme()->accent, LV_OPA_COVER, ui_px(4));
 	if (end >= hot_x) {
-		rect(layer, hot_x, y1, end, y2, HOT_AMBER, LV_OPA_COVER, ui_px(3));
+		rect(layer, hot_x, y1, end, y2, HOT_AMBER, LV_OPA_COVER, ui_px(4));
 	}
 	if (hold > lo) {
-		int32_t hx = x1 + (int32_t)(fminf((hold - lo) / (hi - lo), 1.0f) * (float)w) - ui_px(2);
-		rect(layer, hx, y1, hx + ui_px(2), y2, lv_color_white(), LV_OPA_80, 0);
+		int32_t hx = x1 + (int32_t)(fminf((hold - lo) / (hi - lo), 1.0f) * (float)w) - ui_px(3);
+		rect(layer, hx, y1, hx + ui_px(3), y2, lv_color_white(), LV_OPA_90, 0);
 	}
 }
 
-static void draw_cb(lv_event_t *e) {
-	lv_layer_t *layer = lv_event_get_layer(e);
-	if (!layer || mode == METER_OFF) {
-		return;
-	}
-	lv_area_t a;
-	lv_obj_get_coords(band, &a);
-	int32_t pad = ui_px(14);
-	int32_t clip_w = ui_px(10);
-	int32_t x1 = a.x1 + pad, x2 = a.x2 - pad - clip_w - ui_px(8);
-	int32_t top = a.y1 + ui_px(10), bottom = a.y2 - ui_px(8);
+static void draw_bars(lv_layer_t *layer, int32_t x1, int32_t top, int32_t x2, int32_t bottom) {
 	lv_color_t ink = lv_color_white();
-	bool clip_lit = clip_seen && lv_tick_elaps(clip_at) < CLIP_HOLD_MS;
-
-	// The clip mark, always in the same place, dark until the output clips.
-	rect(layer, a.x2 - pad - clip_w + 1, top, a.x2 - pad, bottom - font_ui_14.line_height - ui_px(4),
-		 clip_lit ? CLIP_RED : lv_color_white(), clip_lit ? LV_OPA_COVER : LV_OPA_20, ui_px(3));
-
-	if (mode == METER_SPECTRUM) {
-		int32_t base = bottom - font_ui_14.line_height - ui_px(4);
-		int32_t span = base - top;
-		int32_t gap = ui_px(3);
-		int32_t bw = ((x2 - x1 + 1) - gap * (BANDS - 1)) / BANDS;
-		for (int b = 0; b < BANDS; b++) {
-			int32_t bx = x1 + b * (bw + gap);
-			float f = (spec_db[b] - SPEC_FLOOR_DB) / -SPEC_FLOOR_DB;
-			int32_t h = (int32_t)(fminf(fmaxf(f, 0.0f), 1.0f) * (float)span);
-			rect(layer, bx, top, bx + bw - 1, base, lv_color_white(), LV_OPA_10, ui_px(2));
-			rect(layer, bx, base - h, bx + bw - 1, base, theme()->accent, LV_OPA_COVER, ui_px(2));
-		}
-		text(layer, "60", x1, bottom - font_ui_14.line_height, x1 + ui_px(60), LV_TEXT_ALIGN_LEFT, ink);
-		text(layer, "1k", (x1 + x2) / 2 - ui_px(30), bottom - font_ui_14.line_height, (x1 + x2) / 2 + ui_px(30),
-			 LV_TEXT_ALIGN_CENTER, ink);
-		text(layer, "16k", x2 - ui_px(60), bottom - font_ui_14.line_height, x2, LV_TEXT_ALIGN_RIGHT, ink);
-		return;
-	}
-
 	bool vu = mode == METER_VU;
 	float lo = vu ? VU_MIN : PEAK_FLOOR_DB, hi = vu ? VU_MAX : 0.0f, hot = vu ? 0.0f : -6.0f;
-	int32_t label_w = ui_px(18);
-	int32_t bx1 = x1 + label_w;
-	int32_t scale_h = font_ui_14.line_height;
-	int32_t bars_bottom = bottom - scale_h - ui_px(4);
-	int32_t bar_h = (bars_bottom - top - ui_px(6)) / 2;
+	const lv_font_t *small = &font_ui_16;
+	const lv_font_t *big = &font_ui_22;
+	int32_t label_w = ui_px(26);
+	int32_t value_w = ui_px(78);
+	int32_t bx1 = x1 + label_w, bx2 = x2 - value_w;
+	int32_t scale_h = small->line_height;
+	int32_t gap = ui_px(14);
+	int32_t bar_h = (bottom - top - scale_h - ui_px(8) - gap) / 2;
+	if (bar_h > ui_px(64)) {
+		bar_h = ui_px(64);
+	}
+	int32_t block = bar_h * 2 + gap + ui_px(8) + scale_h;
+	int32_t y0 = top + (bottom - top - block) / 2;
 	static const char *const CH[2] = {"L", "R"};
 	for (int c = 0; c < 2; c++) {
-		int32_t y1 = top + c * (bar_h + ui_px(6));
-		text(layer, CH[c], x1, y1 + (bar_h - font_ui_14.line_height) / 2, bx1 - ui_px(4), LV_TEXT_ALIGN_LEFT, ink);
-		hbar(layer, bx1, y1, x2, y1 + bar_h - 1, lo, hi, hot, shown_db[c], vu ? lo : hold_db[c]);
+		int32_t y1 = y0 + c * (bar_h + gap);
+		int32_t mid = y1 + (bar_h - big->line_height) / 2;
+		text(layer, CH[c], big, x1, mid, bx1 - ui_px(6), LV_TEXT_ALIGN_LEFT, ink, LV_OPA_80);
+		hbar(layer, bx1, y1, bx2, y1 + bar_h - 1, lo, hi, hot, shown_db[c], vu ? lo : hold_db[c]);
+		// The figure beside it: the held peak, or the VU reading.
+		float v = vu ? shown_db[c] : hold_db[c];
+		char buf[16];
+		if (v <= lo + 0.05f) {
+			snprintf(buf, sizeof(buf), "--");
+		} else {
+			snprintf(buf, sizeof(buf), "%+.1f", (double)v);
+		}
+		text(layer, buf, big, bx2 + ui_px(6), mid, x2, LV_TEXT_ALIGN_RIGHT, ink, LV_OPA_COVER);
 	}
 	static const float PEAK_TICKS[] = {-40, -20, -10, -6, -3, 0};
 	static const char *const PEAK_NAMES[] = {"-40", "-20", "-10", "-6", "-3", "0"};
@@ -340,14 +341,234 @@ static void draw_cb(lv_event_t *e) {
 	static const char *const VU_NAMES[] = {"-20", "-10", "-5", "-3", "0", "+3"};
 	const float *ticks = vu ? VU_TICKS : PEAK_TICKS;
 	const char *const *names = vu ? VU_NAMES : PEAK_NAMES;
-	int32_t w = x2 - bx1 + 1;
+	int32_t w = bx2 - bx1 + 1;
+	int32_t sy = y0 + 2 * bar_h + gap + ui_px(8);
 	for (int i = 0; i < 6; i++) {
 		int32_t tx = bx1 + (int32_t)((ticks[i] - lo) / (hi - lo) * (float)w);
 		lv_text_align_t al = i == 5 ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_CENTER;
 		int32_t tx1 = i == 5 ? tx - ui_px(40) : tx - ui_px(20), tx2 = i == 5 ? tx : tx + ui_px(20);
-		text(layer, names[i], tx1, bottom - scale_h, tx2, al, ink);
+		text(layer, names[i], small, tx1, sy, tx2, al, ink, LV_OPA_70);
 	}
-	text(layer, vu ? "VU" : "dBFS", a.x2 - pad - ui_px(60), bottom - scale_h, a.x2 - pad, LV_TEXT_ALIGN_RIGHT, ink);
+	text(layer, vu ? "VU" : "dBFS", small, bx2 + ui_px(6), sy, x2, LV_TEXT_ALIGN_RIGHT, ink, LV_OPA_70);
+}
+
+static void draw_spectrum(lv_layer_t *layer, int32_t x1, int32_t top, int32_t x2, int32_t bottom) {
+	const lv_font_t *small = &font_ui_16;
+	int32_t base = bottom - small->line_height - ui_px(6);
+	int32_t span = base - top;
+	int32_t gap = ui_px(4);
+	int32_t bw = ((x2 - x1 + 1) - gap * (BANDS - 1)) / BANDS;
+	int32_t used = bw * BANDS + gap * (BANDS - 1);
+	x1 += ((x2 - x1 + 1) - used) / 2;
+	for (int b = 0; b < BANDS; b++) {
+		int32_t bx = x1 + b * (bw + gap);
+		float f = (spec_db[b] - SPEC_FLOOR_DB) / -SPEC_FLOOR_DB;
+		int32_t h = (int32_t)(fminf(fmaxf(f, 0.0f), 1.0f) * (float)span);
+		rect(layer, bx, top, bx + bw - 1, base, lv_color_white(), LV_OPA_10, ui_px(2));
+		rect(layer, bx, base - h, bx + bw - 1, base, theme()->accent, LV_OPA_COVER, ui_px(2));
+	}
+	lv_color_t ink = lv_color_white();
+	int32_t ly = bottom - small->line_height;
+	text(layer, "60", small, x1, ly, x1 + ui_px(60), LV_TEXT_ALIGN_LEFT, ink, LV_OPA_70);
+	text(layer, "1k", small, (x1 + x2) / 2 - ui_px(30), ly, (x1 + x2) / 2 + ui_px(30), LV_TEXT_ALIGN_CENTER, ink,
+		 LV_OPA_70);
+	text(layer, "16k", small, x2 - ui_px(60), ly, x2, LV_TEXT_ALIGN_RIGHT, ink, LV_OPA_70);
+}
+
+static void draw_cb(lv_event_t *e) {
+	lv_layer_t *layer = lv_event_get_layer(e);
+	if (!layer) {
+		return;
+	}
+	lv_area_t a;
+	lv_obj_get_coords(page, &a);
+	int32_t pad = ui_px(18);
+	int32_t x1 = a.x1 + pad, x2 = a.x2 - pad;
+	lv_color_t ink = lv_color_white();
+
+	// Top right, on the back chevron's line in the other corner -- which is
+	// also below the status bar when that stays up over the player: CLIP, lit
+	// for two seconds after the output clips.
+	bool clip_lit = clip_seen && lv_tick_elaps(clip_at) < CLIP_HOLD_MS;
+	const lv_font_t *tag = &font_ui_16;
+	int32_t cw = ui_px(58), ch = tag->line_height + ui_px(8);
+	int32_t cy = a.y1 + back_btn_centre_y() - ch / 2;
+	rect(layer, x2 - cw + 1, cy, x2, cy + ch, clip_lit ? CLIP_RED : ink, clip_lit ? LV_OPA_COVER : LV_OPA_20,
+		 ui_px(6));
+	text(layer, "CLIP", tag, x2 - cw + 1, cy + ui_px(4), x2, LV_TEXT_ALIGN_CENTER, ink,
+		 clip_lit ? LV_OPA_COVER : LV_OPA_50);
+
+	// Bottom: the three kinds, the one shown lit. A tap anywhere moves on.
+	static const char *const NAMES[METER_MODES] = {"musicsettings_meter_peak", "musicsettings_meter_vu",
+												   "musicsettings_meter_spectrum"};
+	const lv_font_t *nf = &font_ui_18;
+	int32_t ny = a.y2 - pad - nf->line_height;
+	int32_t third = (x2 - x1 + 1) / METER_MODES;
+	for (int i = 0; i < METER_MODES; i++) {
+		bool on = (int)mode == i;
+		int32_t tx1 = x1 + i * third, tx2 = tx1 + third - 1;
+		text(layer, tr(NAMES[i]), nf, tx1, ny, tx2, LV_TEXT_ALIGN_CENTER, on ? theme()->accent : ink,
+			 on ? LV_OPA_COVER : LV_OPA_50);
+		if (on) {
+			rect(layer, (tx1 + tx2) / 2 - ui_px(14), ny + nf->line_height + ui_px(3), (tx1 + tx2) / 2 + ui_px(14),
+				 ny + nf->line_height + ui_px(6), theme()->accent, LV_OPA_COVER, ui_px(2));
+		}
+	}
+
+	int32_t top = cy + ch + ui_px(16);
+	int32_t bottom = ny - ui_px(18);
+	if (mode == METER_SPECTRUM) {
+		draw_spectrum(layer, x1, top, x2, bottom);
+	} else {
+		draw_bars(layer, x1, top, x2, bottom);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The slide
+// ---------------------------------------------------------------------------
+
+static void progress_apply(int32_t p) {
+	if (p < 0) {
+		p = 0;
+	}
+	if (p > FULL) {
+		p = FULL;
+	}
+	progress = p;
+	if (!placed_valid) {
+		return;
+	}
+	if (p == 0) {
+		lv_obj_set_hidden(page, true);
+		return;
+	}
+	int32_t h = lv_area_get_height(&placed);
+	lv_obj_set_pos(page, placed.x1, placed.y1 + h * (FULL - p) / FULL);
+	if (lv_obj_is_hidden(page)) {
+		lv_obj_set_hidden(page, false);
+		lv_obj_move_foreground(page);
+		reset_ballistics();
+		last_tick = 0;
+		levelmeter_set_wanted(true);
+		lv_timer_set_period(timer, FRAME_MS);
+		lv_timer_ready(timer);
+	}
+}
+
+static void progress_exec(void *var, int32_t v) {
+	(void)var;
+	progress_apply(v);
+}
+
+static void slide_to(int32_t p) {
+	lv_anim_delete(page, progress_exec);
+	if (progress == p) {
+		progress_apply(p);
+		return;
+	}
+	lv_anim_t a;
+	lv_anim_init(&a);
+	lv_anim_set_var(&a, page);
+	lv_anim_set_exec_cb(&a, progress_exec);
+	lv_anim_set_values(&a, progress, p);
+	lv_anim_set_duration(&a, SLIDE_MS);
+	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+	lv_anim_start(&a);
+}
+
+// Where the sleeve is now; false when the page may not be up.
+static bool place(void) {
+	lv_area_t rel;
+	if (!where_cb || !where_cb(&rel)) {
+		return false;
+	}
+	if (!placed_valid || memcmp(&rel, &placed, sizeof(rel)) != 0) {
+		placed = rel;
+		placed_valid = true;
+		lv_obj_set_size(page, lv_area_get_width(&rel), lv_area_get_height(&rel));
+		progress_apply(progress);
+	}
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// The swipes: up on the sleeve brings the page, down on the page takes it away
+// ---------------------------------------------------------------------------
+
+static void swiped_clear_cb(void *unused) {
+	(void)unused;
+	swiped = false;
+}
+
+static void drag_cb(lv_event_t *e) {
+	static lv_point_t start;
+	static bool tracking, engaged;
+
+	bool opening = (bool)(uintptr_t)lv_event_get_user_data(e);
+	lv_event_code_t code = lv_event_get_code(e);
+	lv_indev_t *indev = lv_indev_active();
+	if (!indev) {
+		return;
+	}
+	if (code == LV_EVENT_PRESSED) {
+		tracking = opening ? progress == 0 && !player_sheet_drag_active() && place() : progress == FULL;
+		engaged = false;
+		lv_indev_get_point(indev, &start);
+		return;
+	}
+	if (!tracking) {
+		return;
+	}
+	lv_point_t p;
+	lv_indev_get_point(indev, &p);
+	int dx = p.x - start.x, dy = p.y - start.y;
+	int32_t h = placed_valid ? lv_area_get_height(&placed) : 1;
+
+	if (code == LV_EVENT_PRESSING) {
+		if (!engaged) {
+			if (player_sheet_drag_active() || switcher_back_drag_active()) {
+				tracking = false;
+				return;
+			}
+			if (LV_ABS(dx) >= DRAG_PX && LV_ABS(dx) >= LV_ABS(dy)) {
+				tracking = false; // sideways: the lyrics, or the player going
+				return;
+			}
+			if (LV_ABS(dy) < DRAG_PX || LV_ABS(dy) < 2 * LV_ABS(dx)) {
+				return;
+			}
+			if ((opening && dy > 0) || (!opening && dy < 0)) {
+				tracking = false; // the other way: not this gesture
+				return;
+			}
+			engaged = true;
+			swiped = true;
+			lv_anim_delete(page, progress_exec);
+		}
+		int32_t moved = (int32_t)(-dy) * FULL / h;
+		progress_apply(opening ? moved : FULL + moved);
+		return;
+	}
+	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+		tracking = false;
+		if (!engaged) {
+			return;
+		}
+		engaged = false;
+		bool far = LV_ABS(dy) > h / COMMIT_FRACTION;
+		up_wanted = opening ? far : !far;
+		slide_to(up_wanted ? FULL : 0);
+		lv_async_call(swiped_clear_cb, NULL);
+	}
+}
+
+static void tap_cb(lv_event_t *e) {
+	(void)e;
+	if (swiped || player_sheet_drag_active() || progress != FULL) {
+		return;
+	}
+	meterview_set_mode((meter_mode_t)((meterview_mode() + 1) % METER_MODES));
 }
 
 // ---------------------------------------------------------------------------
@@ -355,13 +576,17 @@ static void draw_cb(lv_event_t *e) {
 // ---------------------------------------------------------------------------
 
 static void tick_cb(lv_timer_t *t) {
-	lv_area_t rel;
-	bool show = meterview_mode() != METER_OFF && power_screen_is_on() && where_cb && where_cb(&rel);
-	if (!show) {
-		if (!lv_obj_is_hidden(band)) {
-			lv_obj_set_hidden(band, true);
-			reset_ballistics();
+	bool allowed = place();
+	if (!allowed) {
+		// Away with the player, the page goes too, and comes back with it.
+		if (progress > 0) {
+			lv_anim_delete(page, progress_exec);
+			progress_apply(0);
 		}
+	} else if (up_wanted && progress == 0 && !lv_anim_get(page, progress_exec)) {
+		progress_apply(FULL);
+	}
+	if (progress == 0 || !power_screen_is_on()) {
 		levelmeter_set_wanted(false);
 		lv_timer_set_period(t, IDLE_MS);
 		last_tick = 0;
@@ -369,17 +594,8 @@ static void tick_cb(lv_timer_t *t) {
 	}
 	lv_timer_set_period(t, FRAME_MS);
 	levelmeter_set_wanted(true);
-	if (memcmp(&rel, &placed, sizeof(rel)) != 0) {
-		placed = rel;
-		lv_obj_set_pos(band, rel.x1, rel.y1);
-		lv_obj_set_size(band, lv_area_get_width(&rel), lv_area_get_height(&rel));
-	}
-	if (lv_obj_is_hidden(band)) {
-		lv_obj_set_hidden(band, false);
-		lv_obj_move_foreground(band);
-	}
 	step(lv_tick_get());
-	lv_obj_invalidate(band);
+	lv_obj_invalidate(page);
 }
 
 void meterview_create(lv_obj_t *panel, bool (*where)(lv_area_t *rel)) {
@@ -387,15 +603,27 @@ void meterview_create(lv_obj_t *panel, bool (*where)(lv_area_t *rel)) {
 	meterview_mode();
 	reset_ballistics();
 
-	band = lv_obj_create(panel);
-	lv_obj_remove_style_all(band);
-	lv_obj_set_style_bg_color(band, lv_color_black(), 0);
-	lv_obj_set_style_bg_opa(band, LV_OPA_60, 0);
-	// Takes no press: the artwork under it is what the player is dragged by.
-	lv_obj_set_clickable(band, false);
-	lv_obj_set_scrollable(band, false);
-	lv_obj_add_event_cb(band, draw_cb, LV_EVENT_DRAW_MAIN_END, NULL);
-	lv_obj_set_hidden(band, true);
+	page = lv_obj_create(panel);
+	lv_obj_remove_style_all(page);
+	lv_obj_set_style_bg_color(page, lv_color_make(14, 14, 16), 0);
+	lv_obj_set_style_bg_opa(page, LV_OPA_COVER, 0);
+	lv_obj_set_scrollable(page, false);
+	lv_obj_set_clickable(page, true);
+	lv_obj_set_event_bubble(page, false);
+	lv_obj_add_event_cb(page, draw_cb, LV_EVENT_DRAW_MAIN_END, NULL);
+	lv_obj_add_event_cb(page, tap_cb, LV_EVENT_CLICKED, NULL);
+	lv_obj_add_event_cb(page, drag_cb, LV_EVENT_PRESSED, (void *)(uintptr_t) false);
+	lv_obj_add_event_cb(page, drag_cb, LV_EVENT_PRESSING, (void *)(uintptr_t) false);
+	lv_obj_add_event_cb(page, drag_cb, LV_EVENT_RELEASED, (void *)(uintptr_t) false);
+	lv_obj_add_event_cb(page, drag_cb, LV_EVENT_PRESS_LOST, (void *)(uintptr_t) false);
+	// Sideways on the page is the player going, as on the sleeve.
+	player_sheet_attach_drag(page, false);
+	lv_obj_set_hidden(page, true);
+
+	lv_obj_add_event_cb(panel, drag_cb, LV_EVENT_PRESSED, (void *)(uintptr_t) true);
+	lv_obj_add_event_cb(panel, drag_cb, LV_EVENT_PRESSING, (void *)(uintptr_t) true);
+	lv_obj_add_event_cb(panel, drag_cb, LV_EVENT_RELEASED, (void *)(uintptr_t) true);
+	lv_obj_add_event_cb(panel, drag_cb, LV_EVENT_PRESS_LOST, (void *)(uintptr_t) true);
 
 	timer = lv_timer_create(tick_cb, IDLE_MS, NULL);
 	power_pause_in_standby(timer);

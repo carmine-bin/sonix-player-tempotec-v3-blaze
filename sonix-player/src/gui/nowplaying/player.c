@@ -5620,41 +5620,30 @@ void player_sheet_attach_drag(lv_obj_t *obj, bool opening) {
 }
 
 // Builds the player sheet: artwork, controls and the poll that drives them.
-// Where the level meter goes (meterview.h): across the foot of the sleeve as
-// it is drawn now, above Waveform's title and star where they sit on it. Not
-// while the player is away or the lyrics are over the sleeve.
+// Where the level meter's page goes (meterview.h): over the sleeve as it is
+// drawn now, as the lyrics are. Not while the player is away or the lyrics are
+// up.
 static bool meter_where(lv_area_t *rel) {
-	if (!sheet_open || lyrics_now || !cover_panel) {
+	if (!sheet_open || lyrics_now || lyrics_progress > 0 || !cover_panel) {
 		return false;
 	}
 	lv_area_t panel, base;
 	lv_obj_get_coords(cover_panel, &panel);
-	if (cover_img && !lv_obj_is_hidden(cover_img) && lv_area_get_width(&cover_img->coords) > ui_px(100)) {
-		lv_obj_get_coords(cover_img, &base);
+	if (layout_studio_now && cover_img && !lv_obj_is_hidden(cover_img) &&
+		lv_area_get_width(&cover_img->coords) > ui_px(100)) {
+		lv_obj_get_coords(cover_img, &base); // Studio's sleeve sits inside the panel
 	} else {
 		base = panel;
-		base.y2 = base.y1 + lv_area_get_width(&panel) - 1; // the sleeve's square
+		base.y2 = base.y1 + cover_box_w - 1; // the sleeve's square
 	}
 	if (base.y2 > panel.y2) {
 		base.y2 = panel.y2;
 	}
-	int32_t bottom = base.y2;
-	if (layout_alt_now && alt_text_col && !lv_obj_is_hidden(alt_text_col)) {
-		lv_area_t col;
-		lv_obj_get_coords(alt_text_col, &col);
-		if (col.y1 > base.y1 && col.y1 <= bottom) {
-			bottom = col.y1 - ui_px(6);
-		}
-	}
-	int32_t h = lv_area_get_width(&base) * 30 / 100;
-	if (h < ui_px(110)) {
-		h = ui_px(110);
-	}
 	rel->x1 = base.x1 - panel.x1;
 	rel->x2 = base.x2 - panel.x1;
-	rel->y2 = bottom - panel.y1;
-	rel->y1 = rel->y2 - h + 1;
-	return rel->y1 >= 0;
+	rel->y1 = base.y1 - panel.y1;
+	rel->y2 = base.y2 - panel.y1;
+	return lv_area_get_height(&base) > ui_px(160);
 }
 
 void player_init(gui_config_t *cfg) {

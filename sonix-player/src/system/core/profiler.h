@@ -11,6 +11,8 @@
 // the trigger file removed. sonix_player_debug resolves the addresses.
 // A second number on the line delays the start by that many seconds, so the
 // file can be put on the card before the player boots.
+// With no delay and the file already there when the player starts, sampling
+// begins at once, which is how the start itself is profiled.
 void profiler_start(const char *sd_root);
 
 // Called on the profiler's own thread when sampling starts and when the report

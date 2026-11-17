@@ -112,8 +112,13 @@ static void *profiler_thread(void *arg) {
 	if (access(left, F_OK) == 0 && access(trigger_path, F_OK) != 0) {
 		rename(left, trigger_path);
 	}
-	for (;;) {
-		sleep(2);
+	// The first look is at once: a trigger that was on the card before the
+	// player started is there to sample the start itself, and two seconds in,
+	// most of that is over.
+	for (bool first = true;; first = false) {
+		if (!first) {
+			sleep(2);
+		}
 		FILE *t = fopen(trigger_path, "r");
 		if (!t) {
 			continue;

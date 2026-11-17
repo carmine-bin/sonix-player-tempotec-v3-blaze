@@ -2617,7 +2617,7 @@ static void lyrics_bg_arrived(void *user) {
 		cover_free(&lyrics_screen_pic);
 		lyrics_screen_pic = job->out;
 		lyrics_screen_pic.dsc.data = lyrics_screen_pic.pixels; // struct moved, buffer didn't
-		if (lyrics_progress > 0) {
+		if (lyrics_progress > 0 || meterview_is_up()) {
 			lyrics_look(true);
 		}
 	} else {
@@ -5646,6 +5646,42 @@ static bool meter_where(lv_area_t *rel) {
 	return lv_area_get_height(&base) > ui_px(160);
 }
 
+// The meter's page coming in (meterview.h): the sleeve goes up and out ahead of
+// it, and the lyrics' look -- the blurred sleeve behind the whole screen, the
+// surfaces over it made clear -- is put on in one step as it starts and taken
+// off as it ends, never faded with the finger. True while that picture is up.
+static void meter_shift(lv_obj_t *obj, int32_t y) {
+	if (!obj) {
+		return;
+	}
+	if (y == 0) {
+		lv_obj_remove_local_style_prop(obj, LV_STYLE_TRANSLATE_Y, 0);
+	} else {
+		lv_obj_set_style_translate_y(obj, y, 0);
+	}
+}
+
+static bool meter_look(int32_t progress, int32_t height) {
+	bool rest = progress == 0;
+	if (rest || !lyrics_look_on) {
+		lyrics_look(!rest);
+	}
+	int32_t away = -height * progress / 1000;
+	if (layout_studio_now) {
+		meter_shift(studio_cover, away);
+		meter_shift(studio_empty, away);
+		meter_shift(studio_quality, away);
+	} else {
+		meter_shift(cover_img, away);
+		meter_shift(cover_placeholder_icon, away);
+		if (layout_alt_now) {
+			meter_shift(alt_text_col, away);
+			meter_shift(alt_fav_circle, away);
+		}
+	}
+	return !rest && (layout_studio_now ? current_backdrop.pixels != NULL : lyrics_look_on);
+}
+
 void player_init(gui_config_t *cfg) {
 	// The artwork decodes on the shared worker; make sure it exists before
 	// the first track can be started. Safe to call more than once.
@@ -6276,7 +6312,7 @@ void player_init(gui_config_t *cfg) {
 	layout_studio_now = false;
 	apply_layout();
 
-	meterview_create(cover_panel, meter_where);
+	meterview_create(cover_panel, meter_where, meter_look);
 
 	theme_register_refresh(player_refresh_theme);
 }

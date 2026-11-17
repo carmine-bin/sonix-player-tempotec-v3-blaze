@@ -10,8 +10,9 @@
 //
 // A swipe up on the sleeve brings it in from the bottom and a swipe down puts
 // it away; the other directions are taken (right to left the lyrics, left to
-// right the player itself, down from the top the control centre). A tap on it
-// moves to the next of the three:
+// right the player itself, down from the top the control centre). A tap
+// on one of the three names along the bottom shows that one, and a tap anywhere
+// else moves to the next:
 //
 //   Peak      one bar per channel, -48..0 dBFS. Rises at once, falls 24 dB in
 //             2.8 s, with the highest of the last 1.5 s held as a line and
@@ -47,6 +48,10 @@ bool meterview_is_up(void);
 
 // Built once by the player, on its artwork panel. `where` says whether the page
 // may be brought in now and, if so, the sleeve's area relative to the panel.
-void meterview_create(lv_obj_t *panel, bool (*where)(lv_area_t *rel));
+// `look` is told where the page is (0..1000) whenever it moves, so the player
+// can push the sleeve out ahead of it and put the blurred sleeve behind the
+// screen as the lyrics do; it answers whether that blurred picture is up, and
+// the page is drawn clear over it then, on a dark ground of its own otherwise.
+void meterview_create(lv_obj_t *panel, bool (*where)(lv_area_t *rel), bool (*look)(int32_t progress, int32_t height));
 
 #endif /* METERVIEW_H */

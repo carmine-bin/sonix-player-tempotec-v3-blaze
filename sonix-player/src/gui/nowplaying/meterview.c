@@ -43,6 +43,15 @@
 static lv_obj_t *page;
 static lv_timer_t *timer;
 static bool (*where_cb)(lv_area_t *rel);
+static bool (*look_cb)(int32_t progress, int32_t height);
+static bool clear_ground; // drawn over the blurred sleeve, not on a ground of its own
+
+// Where the parts that move were drawn, for invalidating only those each frame:
+// the names along the bottom and the scale's figures do not change, and over the
+// blurred sleeve every pixel invalidated is a pixel of picture redrawn.
+static lv_area_t dyn_area, clip_area, names_area;
+static bool dyn_valid;
+static uint32_t last_sig; // what the frame showed, to skip one that would look the same
 static meter_mode_t mode;
 static bool mode_loaded;
 
@@ -91,6 +100,7 @@ static void reset_ballistics(void) {
 
 void meterview_set_mode(meter_mode_t m) {
 	meterview_mode();
+	last_sig = 0;
 	mode = m;
 	config_set_int("screen", "meter_mode", (long)m);
 	config_save();
@@ -395,6 +405,7 @@ static void draw_cb(lv_event_t *e) {
 	int32_t cy = a.y1 + back_btn_centre_y() - ch / 2;
 	rect(layer, x2 - cw + 1, cy, x2, cy + ch, clip_lit ? CLIP_RED : ink, clip_lit ? LV_OPA_COVER : LV_OPA_20,
 		 ui_px(6));
+	clip_area = (lv_area_t){x2 - cw + 1, cy, x2, cy + ch};
 	text(layer, "CLIP", tag, x2 - cw + 1, cy + ui_px(4), x2, LV_TEXT_ALIGN_CENTER, ink,
 		 clip_lit ? LV_OPA_COVER : LV_OPA_50);
 
@@ -404,6 +415,7 @@ static void draw_cb(lv_event_t *e) {
 	const lv_font_t *nf = &font_ui_18;
 	int32_t ny = a.y2 - pad - nf->line_height;
 	int32_t third = (x2 - x1 + 1) / METER_MODES;
+	names_area = (lv_area_t){x1, ny - ui_px(14), x2, a.y2};
 	for (int i = 0; i < METER_MODES; i++) {
 		bool on = (int)mode == i;
 		int32_t tx1 = x1 + i * third, tx2 = tx1 + third - 1;
@@ -417,6 +429,8 @@ static void draw_cb(lv_event_t *e) {
 
 	int32_t top = cy + ch + ui_px(16);
 	int32_t bottom = ny - ui_px(18);
+	dyn_area = (lv_area_t){a.x1, top, a.x2, bottom};
+	dyn_valid = true;
 	if (mode == METER_SPECTRUM) {
 		draw_spectrum(layer, x1, top, x2, bottom);
 	} else {
@@ -428,6 +442,15 @@ static void draw_cb(lv_event_t *e) {
 // The slide
 // ---------------------------------------------------------------------------
 
+static void set_ground(bool clear) {
+	if (clear == clear_ground) {
+		return;
+	}
+	clear_ground = clear;
+	lv_obj_set_style_bg_opa(page, clear ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+	lv_obj_invalidate(page);
+}
+
 static void progress_apply(int32_t p) {
 	if (p < 0) {
 		p = 0;
@@ -438,6 +461,9 @@ static void progress_apply(int32_t p) {
 	progress = p;
 	if (!placed_valid) {
 		return;
+	}
+	if (look_cb) {
+		set_ground(look_cb(p, lv_area_get_height(&placed)));
 	}
 	if (p == 0) {
 		lv_obj_set_hidden(page, true);
@@ -487,6 +513,7 @@ static bool place(void) {
 		placed = rel;
 		placed_valid = true;
 		lv_obj_set_size(page, lv_area_get_width(&rel), lv_area_get_height(&rel));
+		dyn_valid = false; // drawn again whole at the new size
 		progress_apply(progress);
 	}
 	return true;
@@ -563,12 +590,43 @@ static void drag_cb(lv_event_t *e) {
 	}
 }
 
+// On one of the names along the bottom, that one; anywhere else, the next.
 static void tap_cb(lv_event_t *e) {
 	(void)e;
 	if (swiped || player_sheet_drag_active() || progress != FULL) {
 		return;
 	}
-	meterview_set_mode((meter_mode_t)((meterview_mode() + 1) % METER_MODES));
+	lv_indev_t *indev = lv_indev_active();
+	lv_point_t p = {0, 0};
+	if (indev) {
+		lv_indev_get_point(indev, &p);
+	}
+	meter_mode_t next = (meter_mode_t)((meterview_mode() + 1) % METER_MODES);
+	if (indev && dyn_valid && p.y >= names_area.y1 && p.y <= names_area.y2) {
+		int32_t third = (names_area.x2 - names_area.x1 + 1) / METER_MODES;
+		int32_t i = (p.x - names_area.x1) / (third > 0 ? third : 1);
+		next = (meter_mode_t)(i < 0 ? 0 : i >= METER_MODES ? METER_MODES - 1 : i);
+		if (next == meterview_mode()) {
+			return;
+		}
+	}
+	meterview_set_mode(next);
+}
+
+// A digest of what the next frame would show, so a frame identical to the
+// last -- paused, silent and settled -- is not drawn at all.
+static uint32_t frame_signature(void) {
+	uint32_t h = 2166136261u;
+	const float *vals[] = {shown_db, hold_db, spec_db};
+	const int counts[] = {2, 2, BANDS};
+	for (int v = 0; v < 3; v++) {
+		for (int i = 0; i < counts[v]; i++) {
+			int32_t q = (int32_t)(vals[v][i] * 10.0f); // a tenth of a dB is a pixel's worth at most
+			h = (h ^ (uint32_t)q) * 16777619u;
+		}
+	}
+	bool clip_lit = clip_seen && lv_tick_elaps(clip_at) < CLIP_HOLD_MS;
+	return (h ^ (uint32_t)clip_lit ^ ((uint32_t)mode << 8)) * 16777619u;
 }
 
 // ---------------------------------------------------------------------------
@@ -594,12 +652,26 @@ static void tick_cb(lv_timer_t *t) {
 	}
 	lv_timer_set_period(t, FRAME_MS);
 	levelmeter_set_wanted(true);
+	if (look_cb && progress == FULL) {
+		set_ground(look_cb(FULL, lv_area_get_height(&placed))); // the blur may have arrived since
+	}
 	step(lv_tick_get());
-	lv_obj_invalidate(page);
+	uint32_t sig = frame_signature();
+	if (sig == last_sig && dyn_valid) {
+		return;
+	}
+	last_sig = sig;
+	if (dyn_valid && progress == FULL) {
+		lv_obj_invalidate_area(page, &dyn_area);
+		lv_obj_invalidate_area(page, &clip_area);
+	} else {
+		lv_obj_invalidate(page);
+	}
 }
 
-void meterview_create(lv_obj_t *panel, bool (*where)(lv_area_t *rel)) {
+void meterview_create(lv_obj_t *panel, bool (*where)(lv_area_t *rel), bool (*look)(int32_t progress, int32_t height)) {
 	where_cb = where;
+	look_cb = look;
 	meterview_mode();
 	reset_ballistics();
 

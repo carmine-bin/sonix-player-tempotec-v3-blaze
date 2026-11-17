@@ -1467,6 +1467,14 @@ static struct fb_var_screeninfo fb_var;
 static pthread_mutex_t flip_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t flip_cond = PTHREAD_COND_INITIALIZER;
 static bool flip_pending, flip_thread_on;
+
+// "One screen page" (Developer options), for a panel whose picture is reported
+// to shake: every frame is copied straight into the page on screen and the
+// pages are never flipped. It tears when the interface moves -- the reason the
+// flip exists -- and it is there only to tell whether the flip is what shakes
+// that panel. Nothing about the panel's own timing changes either way. Read
+// once, at start-up.
+static bool fb_single_page;
 static struct fb_var_screeninfo flip_var;
 
 static void *flip_thread(void *arg) {
@@ -1853,6 +1861,36 @@ static void fb_pan_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *
 			return;
 		}
 
+		if (fb_single_page) {
+			// Into the page on screen, and no flip. What either page still
+			// owed is drawn as well: the page on screen can have changed
+			// under the black page or a wake.
+			fb_flip_wait();
+			wait_us = ft_now_us();
+			int shown = fb_var.yoffset ? 1 : 0;
+			dirty_t redraw = rot_page_pending[shown];
+			dirty_add_all(&redraw, &rot_frame_dirty);
+			uint16_t *page = (uint16_t *)(fb_mem + (shown ? fb_page_size : 0));
+			for (int i = 0; i < redraw.n; i++) {
+				ft.copied_px += (uint32_t)area_size(&redraw.r[i]);
+				if (fb_scaled) {
+					blit_scaled_2_3(page, (const uint16_t *)px, &redraw.r[i], fb_rotated);
+				} else if (!fb_rotated) {
+					blit_plain(page, (const uint16_t *)px, &redraw.r[i], (int32_t)fb_var.xres, (int32_t)fb_var.yres);
+				} else {
+					blit_rotated_180(page, (const uint16_t *)px, &redraw.r[i], (int32_t)fb_var.xres,
+									 (int32_t)fb_var.yres);
+				}
+			}
+			dirty_clear(&rot_page_pending[shown]);
+			dirty_add_all(&rot_page_pending[shown ? 0 : 1], &rot_frame_dirty); // owed if ever shown
+			dirty_clear(&rot_frame_dirty);
+			uint64_t done = ft_now_us();
+			ft_frame_done(flush_us, wait_us, done, done);
+			lv_display_flush_ready(disp);
+			return;
+		}
+
 		fb_flip_wait(); // the page about to be written may still be on screen
 		wait_us = ft_now_us();
 		second_page = (fb_var.yoffset == 0); // flip to the other page
@@ -1981,6 +2019,8 @@ static lv_display_t *try_panned_display(void) {
 		return NULL;
 	}
 
+	fb_single_page = config_get_bool("screen", "single_page", false);
+
 	// Ask for two pages.
 	fb_var.yres_virtual = fb_var.yres * 2;
 	fb_var.xres_virtual = fb_var.xres;
@@ -2064,7 +2104,11 @@ static lv_display_t *try_panned_display(void) {
 	fb_flip_start();
 	fb_display = disp;
 
-	printf("fb: double-buffered, page flip on FBIOPAN_DISPLAY (%ux%u)\n", fb_var.xres, fb_var.yres);
+	if (fb_single_page) {
+		printf("fb: ONE PAGE (Developer options): frames copied into the page on screen, no flips -- it will tear\n");
+	} else {
+		printf("fb: double-buffered, page flip on FBIOPAN_DISPLAY (%ux%u)\n", fb_var.xres, fb_var.yres);
+	}
 	return disp;
 }
 

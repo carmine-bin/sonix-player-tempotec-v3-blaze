@@ -100,6 +100,7 @@ static lv_obj_t *bat_label;
 static lv_obj_t *vol_label;
 static lv_obj_t *vol_icon;
 static lv_obj_t *hp_icon; // headphone jack indicator: hidden / theme / gold
+static lv_obj_t *lock_icon; // the volume lock, right of the number while it is on
 static lv_obj_t *play_icon;		 // play/pause indicator: hidden when nothing is loaded
 static lv_obj_t *library_icon;	 // Detect changes at work, or just done
 static lv_timer_t *library_timer; // takes the check glyph away
@@ -258,6 +259,9 @@ void topbar_refresh_volume(int percent) {
 	lv_obj_set_hidden(vol_icon, lineout);
 	lv_obj_set_hidden(vol_label, lineout);
 	if (lineout) {
+		if (lock_icon) {
+			lv_obj_set_hidden(lock_icon, true); // there is no level to hold
+		}
 		return;
 	}
 
@@ -280,13 +284,14 @@ void topbar_refresh_volume(int percent) {
 		lv_obj_remove_local_style_prop(vol_label, LV_STYLE_TEXT_COLOR, 0);
 	}
 
-	// With the volume locked the padlock takes the glyph's place at any level:
-	// it is there the whole time the lock is, which is how a key that does
-	// nothing explains itself on a page with no pill.
+	// The padlock beside the number, the whole time the volume lock is on:
+	// how a key that does nothing explains itself on a page with no pill.
+	if (lock_icon) {
+		lv_obj_set_hidden(lock_icon, !volume_lock_enabled());
+	}
+
 	const lv_image_dsc_t *icon = &icon_volume_high;
-	if (volume_lock_enabled()) {
-		icon = &icon_volume_locked;
-	} else if (percent < VOLUME_LOW_PERCENT) {
+	if (percent < VOLUME_LOW_PERCENT) {
 		icon = &icon_volume_mute;
 	} else if (percent < VOLUME_HIGH_PERCENT) {
 		icon = &icon_volume_low;
@@ -957,6 +962,13 @@ void topbar_init(gui_config_t *cfg) {
 	lv_obj_add_style(vol_label, &theme_style_text, 0);
 	lv_obj_set_style_text_font(vol_label, &font_ui_24, 0);
 
+	// The volume lock's padlock, part of the volume's own group: a glyph of its
+	// own rather than a mark on the speaker, which at this size nobody saw.
+	lock_icon = lv_image_create(container_left);
+	lv_image_set_src(lock_icon, &icon_lock_status);
+	lv_obj_add_style(lock_icon, &theme_style_icon, 0);
+	lv_obj_set_hidden(lock_icon, !volume_lock_enabled());
+
 	// The jack indicator: appears when headphones are plugged in, theme-coloured
 	// for the 3.5 mm jack and gold for the 4.4 mm balanced one.
 	hp_icon = lv_image_create(container_left);
@@ -1074,7 +1086,7 @@ void topbar_init(gui_config_t *cfg) {
 	// until a tinted page is shown (topbar_tint_on_screen).
 	lv_style_init(&tint_text_style);
 	lv_style_init(&tint_icon_style);
-	lv_obj_t *tinted_icons[] = {vol_icon, hp_icon, play_icon, library_icon, sonixlink_icon, bt_icon, wifi_icon};
+	lv_obj_t *tinted_icons[] = {vol_icon, lock_icon, hp_icon, play_icon, library_icon, sonixlink_icon, bt_icon, wifi_icon};
 	for (size_t i = 0; i < sizeof(tinted_icons) / sizeof(tinted_icons[0]); i++) {
 		lv_obj_add_style(tinted_icons[i], &tint_icon_style, 0);
 	}

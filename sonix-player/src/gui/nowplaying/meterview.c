@@ -5,7 +5,11 @@
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/gui/shell/uiscale.h"
+#include "src/system/audio/audio.h"
+#include "src/system/audio/eq.h"
 #include "src/system/audio/levelmeter.h"
+#include "src/system/audio/replaygain.h"
+#include "src/system/playback/device_state.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
 #include "src/system/device/power.h"
@@ -13,6 +17,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define FRAME_MS 40 // 25 a second: the panel runs at 45, a meter needs no more
 #define IDLE_MS 500 // the check while the page is not on screen
@@ -74,6 +79,19 @@ static float vu_target[2];
 static uint32_t got_at;
 #define SIGNAL_GONE_MS 250
 static float spec_db[BANDS];
+// The caps over the bands: the highest each has been lately, held a moment
+// and then let down more slowly than the band itself.
+static float cap_db[BANDS];
+static uint32_t cap_at[BANDS];
+#define CAP_HOLD_MS 400
+#define CAP_FALL_DB_S 12.0f
+
+// Two lines under the top row: what is playing, and what it goes through.
+static char info_format[96];
+static char info_chain[128];
+static uint32_t info_at;
+#define INFO_EVERY_MS 1000
+static void info_refresh(uint32_t now, bool force);
 static uint32_t clip_at;
 static bool clip_seen;
 static uint32_t last_tick;
@@ -93,7 +111,7 @@ static void reset_ballistics(void) {
 		vu_level[c] = vu_target[c] = 0.0f;
 	}
 	for (int i = 0; i < BANDS; i++) {
-		spec_db[i] = SPEC_FLOOR_DB;
+		spec_db[i] = cap_db[i] = SPEC_FLOOR_DB;
 	}
 	clip_seen = false;
 }
@@ -237,12 +255,17 @@ static void step(uint32_t now) {
 			float fallen = spec_db[b] - SPEC_FALL_DB_S * dt;
 			float target = live ? db[b] : SPEC_FLOOR_DB;
 			spec_db[b] = fmaxf(fmaxf(target, fallen), SPEC_FLOOR_DB);
+			if (spec_db[b] >= cap_db[b]) {
+				cap_db[b] = spec_db[b];
+				cap_at[b] = now;
+			} else if (now - cap_at[b] > CAP_HOLD_MS) {
+				cap_db[b] = fmaxf(cap_db[b] - CAP_FALL_DB_S * dt, spec_db[b]);
+			}
 		}
-		return;
 	}
 
 	for (int c = 0; c < 2; c++) {
-		if (mode == METER_PEAK) {
+		if (mode != METER_VU) { // the peaks: their own page, and the strip over the spectrum
 			float fallen = shown_db[c] - PEAK_FALL_DB_S * dt;
 			float db = got ? to_db(r.peak[c]) : PEAK_FLOOR_DB;
 			shown_db[c] = fmaxf(fmaxf(db, fallen), PEAK_FLOOR_DB);
@@ -364,6 +387,13 @@ static void draw_bars(lv_layer_t *layer, int32_t x1, int32_t top, int32_t x2, in
 
 static void draw_spectrum(lv_layer_t *layer, int32_t x1, int32_t top, int32_t x2, int32_t bottom) {
 	const lv_font_t *small = &font_ui_16;
+	// The peaks over it, as a strip: one thin bar a channel, no figures.
+	int32_t strip = ui_px(8);
+	for (int c = 0; c < 2; c++) {
+		int32_t y = top + c * (strip + ui_px(4));
+		hbar(layer, x1, y, x2, y + strip - 1, PEAK_FLOOR_DB, 0.0f, -6.0f, shown_db[c], hold_db[c]);
+	}
+	top += 2 * strip + ui_px(4) + ui_px(14);
 	int32_t base = bottom - small->line_height - ui_px(6);
 	int32_t span = base - top;
 	int32_t gap = ui_px(4);
@@ -376,6 +406,17 @@ static void draw_spectrum(lv_layer_t *layer, int32_t x1, int32_t top, int32_t x2
 		int32_t h = (int32_t)(fminf(fmaxf(f, 0.0f), 1.0f) * (float)span);
 		rect(layer, bx, top, bx + bw - 1, base, lv_color_white(), LV_OPA_10, ui_px(2));
 		rect(layer, bx, base - h, bx + bw - 1, base, theme()->accent, LV_OPA_COVER, ui_px(2));
+		if (cap_db[b] > SPEC_FLOOR_DB + 1.0f) {
+			float fc = (cap_db[b] - SPEC_FLOOR_DB) / -SPEC_FLOOR_DB;
+			int32_t cy = base - (int32_t)(fminf(fc, 1.0f) * (float)span);
+			int32_t gap_px = ui_px(3);
+			if (cy > base - h - gap_px) {
+				cy = base - h - gap_px; // never on the bar: a cap sits clear of it
+			}
+			if (cy - ui_px(3) >= top) {
+				rect(layer, bx, cy - ui_px(3), bx + bw - 1, cy, lv_color_white(), LV_OPA_COVER, ui_px(1));
+			}
+		}
 	}
 	lv_color_t ink = lv_color_white();
 	int32_t ly = bottom - small->line_height;
@@ -427,7 +468,13 @@ static void draw_cb(lv_event_t *e) {
 		}
 	}
 
-	int32_t top = cy + ch + ui_px(16);
+	// What is playing, and what it goes through, under the top row.
+	const lv_font_t *inf = &font_ui_16;
+	int32_t iy = cy + ch + ui_px(10);
+	text(layer, info_format, inf, x1, iy, x2, LV_TEXT_ALIGN_CENTER, ink, LV_OPA_COVER);
+	text(layer, info_chain, inf, x1, iy + inf->line_height + ui_px(2), x2, LV_TEXT_ALIGN_CENTER, ink, LV_OPA_70);
+
+	int32_t top = iy + 2 * inf->line_height + ui_px(16);
 	int32_t bottom = ny - ui_px(18);
 	dyn_area = (lv_area_t){a.x1, top, a.x2, bottom};
 	dyn_valid = true;
@@ -475,6 +522,7 @@ static void progress_apply(int32_t p) {
 		lv_obj_set_hidden(page, false);
 		lv_obj_move_foreground(page);
 		reset_ballistics();
+		info_refresh(lv_tick_get(), true);
 		last_tick = 0;
 		levelmeter_set_wanted(true);
 		lv_timer_set_period(timer, FRAME_MS);
@@ -613,13 +661,101 @@ static void tap_cb(lv_event_t *e) {
 	meterview_set_mode(next);
 }
 
+// "FLAC · 44.1 kHz · 16 bit · 890 kbps": for a lossless file the average
+// bitrate of the file itself, as Lotoo shows it; for a lossy one the figure
+// the file declares. And under it, what the sound goes through.
+static void info_build(char *fmt, size_t fmt_size, char *chain, size_t chain_size) {
+	device_state_t st;
+	device_state_get(&st);
+	fmt[0] = '\0';
+	int dsd = audio_get_dsd_multiple();
+	if (dsd > 0) {
+		snprintf(fmt, fmt_size, "DSD%d \xc2\xb7 %.1f MHz", dsd, 2.8224 * dsd / 64.0);
+	} else if (st.stream_sample_rate > 0 && st.current_file[0]) {
+		char codec[16] = "";
+		audio_get_stream_codec(codec, sizeof(codec));
+		if (!codec[0]) {
+			const char *dot = strrchr(st.current_file, '.');
+			size_t k = 0;
+			for (const char *c = dot ? dot + 1 : ""; *c && k < sizeof(codec) - 1; c++) {
+				codec[k++] = (char)((*c >= 'a' && *c <= 'z') ? *c - 32 : *c);
+			}
+			codec[k] = '\0';
+		}
+		double khz = st.stream_sample_rate / 1000.0;
+		int kbps = 0;
+		if (audio_stream_is_lossy()) {
+			kbps = audio_get_stream_bitrate_kbps();
+		}
+		struct stat sb;
+		if (kbps <= 0 && !st.live && st.progress_total_secs > 0.5 && stat(st.current_file, &sb) == 0 && sb.st_size > 0) {
+			kbps = (int)((double)sb.st_size * 8.0 / st.progress_total_secs / 1000.0 + 0.5);
+		}
+		int bits = audio_get_stream_bits();
+		char rate[24];
+		snprintf(rate, sizeof(rate), khz == (int)khz ? "%.0f kHz" : "%.1f kHz", khz);
+		if (audio_stream_is_lossy()) {
+			snprintf(fmt, fmt_size, kbps > 0 ? "%s \xc2\xb7 %s \xc2\xb7 %d kbps" : "%s \xc2\xb7 %s", codec, rate, kbps);
+		} else if (kbps > 0) {
+			snprintf(fmt, fmt_size, "%s \xc2\xb7 %s \xc2\xb7 %d bit \xc2\xb7 %d kbps", codec, rate, bits > 0 ? bits : 16,
+					 kbps);
+		} else {
+			snprintf(fmt, fmt_size, "%s \xc2\xb7 %s \xc2\xb7 %d bit", codec, rate, bits > 0 ? bits : 16);
+		}
+	}
+
+	if (direct_get_enabled()) {
+		snprintf(chain, chain_size, "%s", tr("musicsettings_direct"));
+		return;
+	}
+	struct {
+		bool on;
+		const char *name;
+	} fx[] = {
+		{replaygain_active(), "ReplayGain"}, {mseb_get_enabled(), "MSEB"},		  {eq_get_enabled(), "EQ"},
+		{peq_get_enabled(), "PEQ"},			 {soundfield_get_enabled(), "Soundfield"}, {crossfeed_get_enabled(), "Crossfeed"},
+		{mono_get_enabled(), "Mono"},		 {balance_get_enabled(), "Balance"},
+	};
+	size_t used = 0;
+	chain[0] = '\0';
+	for (size_t i = 0; i < sizeof(fx) / sizeof(fx[0]); i++) {
+		if (!fx[i].on) {
+			continue;
+		}
+		int w = snprintf(chain + used, chain_size - used, "%s%s", used ? " \xc2\xb7 " : "", fx[i].name);
+		if (w < 0 || (size_t)w >= chain_size - used) {
+			break;
+		}
+		used += (size_t)w;
+	}
+	if (!used) {
+		snprintf(chain, chain_size, "%s", tr("meter_no_effects"));
+	}
+}
+
+// Rebuilt once a second, and the page drawn whole when it changes.
+static void info_refresh(uint32_t now, bool force) {
+	if (!force && now - info_at < INFO_EVERY_MS) {
+		return;
+	}
+	info_at = now;
+	char fmt[sizeof(info_format)], chain[sizeof(info_chain)];
+	info_build(fmt, sizeof(fmt), chain, sizeof(chain));
+	if (strcmp(fmt, info_format) != 0 || strcmp(chain, info_chain) != 0) {
+		snprintf(info_format, sizeof(info_format), "%s", fmt);
+		snprintf(info_chain, sizeof(info_chain), "%s", chain);
+		dyn_valid = false; // the next frame redraws the page whole
+		last_sig = 0;
+	}
+}
+
 // A digest of what the next frame would show, so a frame identical to the
 // last -- paused, silent and settled -- is not drawn at all.
 static uint32_t frame_signature(void) {
 	uint32_t h = 2166136261u;
-	const float *vals[] = {shown_db, hold_db, spec_db};
-	const int counts[] = {2, 2, BANDS};
-	for (int v = 0; v < 3; v++) {
+	const float *vals[] = {shown_db, hold_db, spec_db, cap_db};
+	const int counts[] = {2, 2, BANDS, BANDS};
+	for (int v = 0; v < 4; v++) {
 		for (int i = 0; i < counts[v]; i++) {
 			int32_t q = (int32_t)(vals[v][i] * 10.0f); // a tenth of a dB is a pixel's worth at most
 			h = (h ^ (uint32_t)q) * 16777619u;
@@ -656,6 +792,7 @@ static void tick_cb(lv_timer_t *t) {
 		set_ground(look_cb(FULL, lv_area_get_height(&placed))); // the blur may have arrived since
 	}
 	step(lv_tick_get());
+	info_refresh(lv_tick_get(), false);
 	uint32_t sig = frame_signature();
 	if (sig == last_sig && dyn_valid) {
 		return;

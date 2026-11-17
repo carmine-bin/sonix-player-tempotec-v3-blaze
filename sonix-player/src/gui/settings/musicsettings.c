@@ -10,6 +10,7 @@
 #include "src/gui/shell/icons.h"
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/library/libraryscan.h"
+#include "src/gui/nowplaying/meterview.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/confirm.h"
 #include "src/gui/audio/eqsettings.h"
@@ -1847,6 +1848,25 @@ static void build_library_page(gui_config_t *cfg) {
 // wears, whose name it shows, and whether the player starts on it.
 // ---------------------------------------------------------------------------
 
+// The level meter on the sleeve (meterview.h).
+static lv_obj_t *meter_pill[4];
+
+static void meter_refresh(void) {
+	for (int i = 0; i < 4; i++) {
+		if (meter_pill[i]) {
+			settingsrow_pill_active(meter_pill[i], (int)meterview_mode() == i);
+		}
+	}
+}
+
+static void meter_pick_cb(lv_event_t *e) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	meterview_set_mode((meter_mode_t)(intptr_t)lv_event_get_user_data(e));
+	meter_refresh();
+}
+
 static void build_nowplaying_page(gui_config_t *cfg) {
 	nowplaying_screen = lv_obj_create(NULL);
 	lv_obj_t *container = settingsrow_page(nowplaying_screen, cfg, "musicsettings_now_playing");
@@ -1873,6 +1893,17 @@ static void build_nowplaying_page(gui_config_t *cfg) {
 	option_note(container, "musicsettings_local_only_note");
 
 	// The sleeve's colour as the accent of the other two arrangements too.
+	lv_obj_t *meter_pills = NULL;
+	settingsrow_pills(container, "musicsettings_meter", &meter_pills);
+	static const char *const METER_NAMES[4] = {"musicsettings_meter_off", "musicsettings_meter_peak",
+											   "musicsettings_meter_vu", "musicsettings_meter_spectrum"};
+	for (int i = 0; i < 4; i++) {
+		meter_pill[i] = settingsrow_pill(meter_pills, METER_NAMES[i], i, meter_pick_cb);
+	}
+	meter_refresh();
+	theme_register_refresh(meter_refresh);
+	option_note(container, "musicsettings_meter_note");
+
 	settingsrow_toggle(container, "musicsettings_cover_accent", &cover_accent_switch, cover_accent_cb);
 	option_note(container, "musicsettings_cover_accent_note");
 	if (player_cover_accent()) {

@@ -50,6 +50,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **Add to queue** - as the next track or at the end.
 - **Queue** - reorder it, select tracks in it, and see the **history** of what you played today, yesterday and before.
 - **Gapless** - no silence between tracks of the same album, also over Bluetooth.
+- **Level meter** - over the bottom of the cover in Now Playing: peak bars, a VU meter or a 20-band spectrum, in time with what you hear, with a red mark that lights when the output clips. Music > Now Playing.
 - **Direct mode** - one switch that bypasses the equaliser, PEQ, MSEB, soundfield, crossfeed, mono, balance and ReplayGain, so the decoded samples reach the DAC untouched. Each of them keeps its settings and comes back when you turn it off.
 - **Fade** - the end of a track fades into the next one, from 1 to 12 seconds.
 - **ReplayGain** - off, by track or by album, read from the tags.

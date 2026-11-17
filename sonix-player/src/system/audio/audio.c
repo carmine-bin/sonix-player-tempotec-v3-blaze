@@ -1,4 +1,5 @@
 #include "audio.h"
+#include "src/system/audio/levelmeter.h"
 #include "src/system/audio/alsa-controls.h"
 #include "src/system/bluetooth/bluetooth.h"
 #include "src/system/decode/decode.h"
@@ -2449,6 +2450,7 @@ static void playback_follow(snd_pcm_t *pcm) {
 		if (pcm && snd_pcm_get_params(pcm, &follow_buffer, &period) < 0) {
 			follow_buffer = 0;
 		}
+		levelmeter_set_buffer_frames((unsigned)follow_buffer);
 	}
 	if (!pcm) {
 		playback_set_rt(false);
@@ -3310,6 +3312,7 @@ static void play_wav_file(const char *filepath) {
 				crossfeed_process((short *)buffer, frames_read, info.channels, info.sample_rate);
 				mono_process((short *)buffer, frames_read, info.channels);
 				balance_process((short *)buffer, frames_read, info.channels);
+				levelmeter_feed_s16((short *)buffer, frames_read, info.channels, info.sample_rate);
 			} else {
 				replaygain_process_s32((int32_t *)buffer, frames_read, info.channels);
 				eq_process_s32((int32_t *)buffer, frames_read, info.channels, info.sample_rate);
@@ -3317,6 +3320,7 @@ static void play_wav_file(const char *filepath) {
 				crossfeed_process_s32((int32_t *)buffer, frames_read, info.channels, info.sample_rate);
 				mono_process_s32((int32_t *)buffer, frames_read, info.channels);
 				balance_process_s32((int32_t *)buffer, frames_read, info.channels);
+				levelmeter_feed_s32((int32_t *)buffer, frames_read, info.channels, info.sample_rate);
 			}
 		}
 		if (frames_read <= 0) {
@@ -4126,6 +4130,7 @@ static void play_decoded_file(const char *filepath, decode_format_t format) {
 				crossfeed_process_s32((int32_t *)buffer, (int)frames_read, channels, out_rate);
 				mono_process_s32((int32_t *)buffer, (int)frames_read, channels);
 				balance_process_s32((int32_t *)buffer, (int)frames_read, channels);
+				levelmeter_feed_s32((int32_t *)buffer, (int)frames_read, channels, out_rate);
 			}
 		} else {
 			pthread_mutex_lock(&audio_mutex);
@@ -4154,6 +4159,7 @@ static void play_decoded_file(const char *filepath, decode_format_t format) {
 				// the level: the balance is about what reaches each ear.
 				mono_process((short *)buffer, (int)frames_read, channels);
 				balance_process((short *)buffer, (int)frames_read, channels);
+				levelmeter_feed_s16((short *)buffer, (int)frames_read, channels, sample_rate);
 			}
 		}
 

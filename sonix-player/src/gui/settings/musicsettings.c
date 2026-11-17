@@ -1895,8 +1895,7 @@ static void build_nowplaying_page(gui_config_t *cfg) {
 	// The sleeve's colour as the accent of the other two arrangements too.
 	lv_obj_t *meter_pills = NULL;
 	settingsrow_pills(container, "musicsettings_meter", &meter_pills);
-	static const char *const METER_NAMES[METER_MODES] = {"musicsettings_meter_peak", "musicsettings_meter_vu",
-														 "musicsettings_meter_spectrum"};
+	static const char *const METER_NAMES[METER_MODES] = {"musicsettings_meter_spectrum", "musicsettings_meter_vu"};
 	for (int i = 0; i < METER_MODES; i++) {
 		meter_pill[i] = settingsrow_pill(meter_pills, METER_NAMES[i], i, meter_pick_cb);
 	}

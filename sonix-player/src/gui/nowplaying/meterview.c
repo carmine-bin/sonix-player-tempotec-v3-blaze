@@ -98,8 +98,9 @@ static uint32_t last_tick;
 
 meter_mode_t meterview_mode(void) {
 	if (!mode_loaded) {
-		long v = config_get_int("screen", "meter_mode", METER_PEAK);
-		mode = (v >= 0 && v < METER_MODES) ? (meter_mode_t)v : METER_PEAK;
+		// A key of its own: "meter_mode" counted peak, VU and spectrum.
+		long v = config_get_int("screen", "meter_page", METER_SPECTRUM);
+		mode = (v >= 0 && v < METER_MODES) ? (meter_mode_t)v : METER_SPECTRUM;
 		mode_loaded = true;
 	}
 	return mode;
@@ -120,7 +121,7 @@ void meterview_set_mode(meter_mode_t m) {
 	meterview_mode();
 	last_sig = 0;
 	mode = m;
-	config_set_int("screen", "meter_mode", (long)m);
+	config_set_int("screen", "meter_page", (long)m);
 	config_save();
 	reset_ballistics();
 	if (page) {
@@ -265,7 +266,7 @@ static void step(uint32_t now) {
 	}
 
 	for (int c = 0; c < 2; c++) {
-		if (mode != METER_VU) { // the peaks: their own page, and the strip over the spectrum
+		if (mode == METER_SPECTRUM) { // the strip over the spectrum
 			float fallen = shown_db[c] - PEAK_FALL_DB_S * dt;
 			float db = got ? to_db(r.peak[c]) : PEAK_FLOOR_DB;
 			shown_db[c] = fmaxf(fmaxf(db, fallen), PEAK_FLOOR_DB);
@@ -335,65 +336,128 @@ static void hbar(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int32_t 
 	}
 }
 
-static void draw_bars(lv_layer_t *layer, int32_t x1, int32_t top, int32_t x2, int32_t bottom) {
-	lv_color_t ink = lv_color_white();
-	bool vu = mode == METER_VU;
-	float lo = vu ? VU_MIN : PEAK_FLOOR_DB, hi = vu ? VU_MAX : 0.0f, hot = vu ? 0.0f : -6.0f;
-	const lv_font_t *small = &font_ui_16;
-	const lv_font_t *big = &font_ui_22;
-	int32_t label_w = ui_px(26);
-	int32_t value_w = ui_px(78);
-	int32_t bx1 = x1 + label_w, bx2 = x2 - value_w;
-	int32_t scale_h = small->line_height;
-	int32_t gap = ui_px(14);
-	int32_t bar_h = (bottom - top - scale_h - ui_px(8) - gap) / 2;
-	if (bar_h > ui_px(64)) {
-		bar_h = ui_px(64);
-	}
-	int32_t block = bar_h * 2 + gap + ui_px(8) + scale_h;
-	int32_t y0 = top + (bottom - top - block) / 2;
-	static const char *const CH[2] = {"L", "R"};
-	for (int c = 0; c < 2; c++) {
-		int32_t y1 = y0 + c * (bar_h + gap);
-		int32_t mid = y1 + (bar_h - big->line_height) / 2;
-		text(layer, CH[c], big, x1, mid, bx1 - ui_px(6), LV_TEXT_ALIGN_LEFT, ink, LV_OPA_80);
-		hbar(layer, bx1, y1, bx2, y1 + bar_h - 1, lo, hi, hot, shown_db[c], vu ? lo : hold_db[c]);
-		// The figure beside it: the held peak, or the VU reading.
-		float v = vu ? shown_db[c] : hold_db[c];
-		char buf[16];
-		if (v <= lo + 0.05f) {
-			snprintf(buf, sizeof(buf), "--");
-		} else {
-			snprintf(buf, sizeof(buf), "%+.1f", (double)v);
+static void line(lv_layer_t *layer, float x1, float y1, float x2, float y2, int32_t width, lv_color_t color) {
+	lv_draw_line_dsc_t dsc;
+	lv_draw_line_dsc_init(&dsc);
+	dsc.p1 = (lv_point_precise_t){(lv_value_precise_t)x1, (lv_value_precise_t)y1};
+	dsc.p2 = (lv_point_precise_t){(lv_value_precise_t)x2, (lv_value_precise_t)y2};
+	dsc.width = width;
+	dsc.color = color;
+	dsc.opa = LV_OPA_COVER;
+	dsc.round_start = 1;
+	dsc.round_end = 1;
+	lv_draw_line(layer, &dsc);
+}
+
+// Where `vu` sits on a VU's printed scale, 0..1. The scale is linear in
+// voltage, which is why 0 VU is two thirds of the way across and -20 is
+// crowded at the left.
+static float vu_pos(float vu) {
+	float lo = powf(10.0f, VU_MIN / 20.0f), hi = powf(10.0f, VU_MAX / 20.0f);
+	float v = powf(10.0f, fminf(fmaxf(vu, VU_MIN - 3.0f), VU_MAX + 0.5f) / 20.0f);
+	return (v - lo) / (hi - lo);
+}
+
+#define DIAL_SWEEP_DEG 90.0f // the needle's travel, -20 to +3
+
+static const lv_color_t DIAL_FACE = LV_COLOR_MAKE(238, 228, 200); // the old cream
+static const lv_color_t DIAL_INK = LV_COLOR_MAKE(30, 28, 24);
+static const lv_color_t DIAL_RED = LV_COLOR_MAKE(196, 36, 30);
+
+// The angle of a point of the scale, 0..1, in radians from straight up.
+static float dial_angle(float pos) { return (-DIAL_SWEEP_DEG / 2.0f + pos * DIAL_SWEEP_DEG) * (float)M_PI / 180.0f; }
+
+// One dial, drawn as the meters on an old deck are: the scale on an arc round
+// a pivot just below the face, the figures above the ticks, the red band from
+// 0 to +3 along the inside, and the needle at `vu`.
+static void dial(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2, float vu, const char *name) {
+	rect(layer, x1, y1, x2, y2, DIAL_FACE, LV_OPA_COVER, ui_px(8));
+	float w = (float)(x2 - x1 + 1), h = (float)(y2 - y1 + 1);
+	float cx = (float)x1 + w / 2.0f;
+	// Half the sweep's chord within 0.35 of the width, the end figures inside the face, and the arc's top a
+	// third of the way down, which leaves the figures room above it.
+	float r = fminf(w * 0.35f / sinf(DIAL_SWEEP_DEG * 0.5f * (float)M_PI / 180.0f), h * 0.85f);
+	float py = (float)y1 + h * 0.34f + r;
+
+	static const float TICKS[] = {-20, -10, -7, -5, -3, -2, -1, 0, 1, 2, 3};
+	static const char *const NAMES[] = {"20", "10", "7", "5", "3", "", "", "0", "", "", "3"};
+	const lv_font_t *f = &font_ui_14;
+	for (size_t i = 0; i < sizeof(TICKS) / sizeof(TICKS[0]); i++) {
+		float ang = dial_angle(vu_pos(TICKS[i]));
+		float sn = sinf(ang), cs = cosf(ang);
+		bool red = TICKS[i] > 0.0f;
+		bool major = NAMES[i][0] != '\0';
+		float r2 = r * (major ? 1.09f : 1.06f);
+		line(layer, cx + sn * r, py - cs * r, cx + sn * r2, py - cs * r2, ui_px(2), red ? DIAL_RED : DIAL_INK);
+		if (major) {
+			float rt = r * 1.09f + (float)f->line_height * 0.62f;
+			int32_t tx = (int32_t)(cx + sn * rt), ty = (int32_t)(py - cs * rt) - f->line_height / 2;
+			text(layer, NAMES[i], f, tx - ui_px(12), ty, tx + ui_px(12), LV_TEXT_ALIGN_CENTER, red ? DIAL_RED : DIAL_INK,
+				 LV_OPA_COVER);
 		}
-		text(layer, buf, big, bx2 + ui_px(6), mid, x2, LV_TEXT_ALIGN_RIGHT, ink, LV_OPA_COVER);
 	}
-	static const float PEAK_TICKS[] = {-40, -20, -10, -6, -3, 0};
-	static const char *const PEAK_NAMES[] = {"-40", "-20", "-10", "-6", "-3", "0"};
-	static const float VU_TICKS[] = {-20, -10, -5, -3, 0, 3};
-	static const char *const VU_NAMES[] = {"-20", "-10", "-5", "-3", "0", "+3"};
-	const float *ticks = vu ? VU_TICKS : PEAK_TICKS;
-	const char *const *names = vu ? VU_NAMES : PEAK_NAMES;
-	int32_t w = bx2 - bx1 + 1;
-	int32_t sy = y0 + 2 * bar_h + gap + ui_px(8);
-	for (int i = 0; i < 6; i++) {
-		int32_t tx = bx1 + (int32_t)((ticks[i] - lo) / (hi - lo) * (float)w);
-		lv_text_align_t al = i == 5 ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_CENTER;
-		int32_t tx1 = i == 5 ? tx - ui_px(40) : tx - ui_px(20), tx2 = i == 5 ? tx : tx + ui_px(20);
-		text(layer, names[i], small, tx1, sy, tx2, al, ink, LV_OPA_70);
+	// The scale's own line, and the red band under it from 0 to +3: short
+	// straight pieces, which at this size read as the arc.
+	const int PIECES = 24;
+	for (int k = 0; k < PIECES; k++) {
+		float a0 = dial_angle((float)k / PIECES), a1 = dial_angle((float)(k + 1) / PIECES);
+		line(layer, cx + sinf(a0) * r, py - cosf(a0) * r, cx + sinf(a1) * r, py - cosf(a1) * r, ui_px(1), DIAL_INK);
 	}
-	text(layer, vu ? "VU" : "dBFS", small, bx2 + ui_px(6), sy, x2, LV_TEXT_ALIGN_RIGHT, ink, LV_OPA_70);
+	float z = vu_pos(0.0f);
+	for (int k = 0; k < 6; k++) {
+		float a0 = dial_angle(z + (1.0f - z) * (float)k / 6.0f), a1 = dial_angle(z + (1.0f - z) * (float)(k + 1) / 6.0f);
+		float rr = r * 0.95f;
+		line(layer, cx + sinf(a0) * rr, py - cosf(a0) * rr, cx + sinf(a1) * rr, py - cosf(a1) * rr, ui_px(4), DIAL_RED);
+	}
+	const lv_font_t *bf = &font_ui_18;
+	int32_t ly = (int32_t)(py - r * 0.50f) - bf->line_height / 2;
+	text(layer, "VU", bf, x1, ly, x2, LV_TEXT_ALIGN_CENTER, DIAL_INK, LV_OPA_COVER);
+	text(layer, name, f, x1 + ui_px(8), y2 - f->line_height - ui_px(4), x1 + ui_px(30), LV_TEXT_ALIGN_LEFT, DIAL_INK,
+		 LV_OPA_70);
+
+	// The needle, from where it comes into the face to just past the scale.
+	float ang = dial_angle(vu_pos(vu));
+	float sn = sinf(ang), cs = cosf(ang);
+	float from = fmaxf(0.0f, (py - (float)y2 + 1.0f) / fmaxf(cs, 0.2f));
+	float to = r * 1.07f;
+	line(layer, cx + sn * from, py - cs * from, cx + sn * to, py - cs * to, ui_px(2), DIAL_INK);
+}
+
+static void draw_dials(lv_layer_t *layer, int32_t x1, int32_t top, int32_t x2, int32_t bottom) {
+	int32_t gap = ui_px(10);
+	int32_t w = (x2 - x1 + 1 - gap) / 2;
+	int32_t h = bottom - top + 1;
+	if (h > w * 9 / 10) {
+		h = w * 9 / 10;
+	}
+	int32_t y1 = top + (bottom - top + 1 - h) / 2;
+	dial(layer, x1, y1, x1 + w - 1, y1 + h - 1, shown_db[0], "L");
+	dial(layer, x1 + w + gap, y1, x1 + 2 * w + gap - 1, y1 + h - 1, shown_db[1], "R");
 }
 
 static void draw_spectrum(lv_layer_t *layer, int32_t x1, int32_t top, int32_t x2, int32_t bottom) {
 	const lv_font_t *small = &font_ui_16;
-	// The peaks over it, as a strip: one thin bar a channel, no figures.
+	// The peaks over it, as a strip: one thin bar a channel, the held peak
+	// written beside it.
+	lv_color_t ink = lv_color_white();
+	int32_t row = small->line_height;
 	int32_t strip = ui_px(8);
+	int32_t lab = ui_px(16), val = ui_px(52);
+	static const char *const CH[2] = {"L", "R"};
 	for (int c = 0; c < 2; c++) {
-		int32_t y = top + c * (strip + ui_px(4));
-		hbar(layer, x1, y, x2, y + strip - 1, PEAK_FLOOR_DB, 0.0f, -6.0f, shown_db[c], hold_db[c]);
+		int32_t y = top + c * (row + ui_px(2));
+		int32_t by = y + (row - strip) / 2;
+		text(layer, CH[c], small, x1, y, x1 + lab, LV_TEXT_ALIGN_LEFT, ink, LV_OPA_70);
+		hbar(layer, x1 + lab, by, x2 - val, by + strip - 1, PEAK_FLOOR_DB, 0.0f, -6.0f, shown_db[c], hold_db[c]);
+		char buf[16];
+		if (hold_db[c] <= PEAK_FLOOR_DB + 0.05f) {
+			snprintf(buf, sizeof(buf), "--");
+		} else {
+			snprintf(buf, sizeof(buf), "%+.1f", (double)hold_db[c]);
+		}
+		text(layer, buf, small, x2 - val, y, x2, LV_TEXT_ALIGN_RIGHT, ink, LV_OPA_COVER);
 	}
-	top += 2 * strip + ui_px(4) + ui_px(14);
+	top += 2 * row + ui_px(2) + ui_px(12);
 	int32_t base = bottom - small->line_height - ui_px(6);
 	int32_t span = base - top;
 	int32_t gap = ui_px(4);
@@ -418,7 +482,6 @@ static void draw_spectrum(lv_layer_t *layer, int32_t x1, int32_t top, int32_t x2
 			}
 		}
 	}
-	lv_color_t ink = lv_color_white();
 	int32_t ly = bottom - small->line_height;
 	text(layer, "60", small, x1, ly, x1 + ui_px(60), LV_TEXT_ALIGN_LEFT, ink, LV_OPA_70);
 	text(layer, "1k", small, (x1 + x2) / 2 - ui_px(30), ly, (x1 + x2) / 2 + ui_px(30), LV_TEXT_ALIGN_CENTER, ink,
@@ -451,8 +514,7 @@ static void draw_cb(lv_event_t *e) {
 		 clip_lit ? LV_OPA_COVER : LV_OPA_50);
 
 	// Bottom: the three kinds, the one shown lit. A tap anywhere moves on.
-	static const char *const NAMES[METER_MODES] = {"musicsettings_meter_peak", "musicsettings_meter_vu",
-												   "musicsettings_meter_spectrum"};
+	static const char *const NAMES[METER_MODES] = {"musicsettings_meter_spectrum", "musicsettings_meter_vu"};
 	const lv_font_t *nf = &font_ui_18;
 	int32_t ny = a.y2 - pad - nf->line_height;
 	int32_t third = (x2 - x1 + 1) / METER_MODES;
@@ -481,7 +543,7 @@ static void draw_cb(lv_event_t *e) {
 	if (mode == METER_SPECTRUM) {
 		draw_spectrum(layer, x1, top, x2, bottom);
 	} else {
-		draw_bars(layer, x1, top, x2, bottom);
+		draw_dials(layer, x1, top, x2, bottom);
 	}
 }
 

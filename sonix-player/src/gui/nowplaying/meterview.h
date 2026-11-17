@@ -11,31 +11,32 @@
 // A swipe up on the sleeve brings it in from the bottom and a swipe down puts
 // it away; the other directions are taken (right to left the lyrics, left to
 // right the player itself, down from the top the control centre). A tap
-// on one of the three names along the bottom shows that one, and a tap anywhere
-// else moves to the next:
+// on one of the two names along the bottom shows that one, and a tap anywhere
+// else moves to the other:
 //
-//   Peak      one bar per channel, -48..0 dBFS. Rises at once, falls 24 dB in
-//             2.8 s, with the highest of the last 1.5 s held as a line and
-//             written out in dB.
-//   VU        the same two bars on a VU's 300 ms integration, -20..+3 VU with
-//             0 VU at -18 dBFS: how loud it sounds rather than how high it
-//             reaches.
 //   Spectrum  twenty bands from 60 Hz up, a 1024-point FFT of the mono sum,
-//             -66..0 dB, falling 20 dB a second.
+//             -66..0 dB, falling 20 dB a second, a cap over each band held a
+//             moment. Above it a thin peak bar per channel, -48..0 dBFS, rising
+//             at once and falling 24 dB in 2.8 s, with the highest of the last
+//             1.5 s held as a line and written out in dB.
+//   VU        two analogue dials, a needle each: a VU's 300 ms integration,
+//             -20..+3 VU with 0 VU at -18 dBFS, on the voltage scale a real VU
+//             is printed with. How loud it sounds rather than how high it
+//             reaches.
 //
-// In all three a red CLIP lights for two seconds when the output clips -- a
-// sample at full scale after the effects, which the output stage clamps.
+// On both a red CLIP lights for two seconds when the output clips -- a sample
+// at full scale after the effects, which the output stage clamps -- and two
+// lines under the top row say what is playing and what it goes through.
 //
-// The kind shown is saved in the config (Music > Now Playing picks it too);
+// The page shown is saved in the config (Music > Now Playing picks it too);
 // whether the page is up lasts while the player runs, as the lyrics' does.
 // It is measured only while the page is on screen: the player open, the screen
 // on. Otherwise its timer slows to a check every half second and the playback
 // thread stops measuring.
 
 typedef enum {
-	METER_PEAK = 0,
+	METER_SPECTRUM = 0,
 	METER_VU = 1,
-	METER_SPECTRUM = 2,
 	METER_MODES
 } meter_mode_t;
 

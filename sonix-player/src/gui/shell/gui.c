@@ -20,6 +20,7 @@
 #include "src/gui/bluetooth/btaudio.h"
 #include "src/gui/bluetooth/btsettings.h"
 #include "src/gui/shell/confirm.h"
+#include "src/gui/shell/scheduledoff.h"
 #include "src/system/core/bootprof.h"
 #include "src/system/core/wakeprof.h"
 #include "src/gui/shell/corners.h"
@@ -835,6 +836,7 @@ void gui_init(gui_config_t *cfg) {
 	BUILD(confirm_init);
 	BUILD(toast_init);
 	BUILD(lowbattery_init);
+	BUILD(scheduledoff_init); // after confirm_init: its countdown is a confirm card
 
 	// The screensaver is drawn both when the panel goes dark (so the wake opens
 	// on it rather than on the page) and when it lights up again; and the

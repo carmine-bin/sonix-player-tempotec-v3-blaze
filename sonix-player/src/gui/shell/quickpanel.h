@@ -73,6 +73,10 @@ typedef enum {
 	QP_BTN_VOLUME_LOCK,
 	// Direct (eq.h): every effect and ReplayGain bypassed while it is lit.
 	QP_BTN_DIRECT,
+	// The scheduled shutdown (scheduledoff.h): the player off a chosen time
+	// from now. Lit while it counts, with the minutes left in place of its
+	// glyph.
+	QP_BTN_SCHEDULED_OFF,
 	QP_BTN_COUNT,
 	QP_BTN_NONE = QP_BTN_COUNT, // an empty place in the grid
 } quickpanel_button_t;

@@ -24,4 +24,7 @@ void confirm_notice(const char *title, const char *message);
 
 void confirm_close(void);
 
+// True while the card is up.
+bool confirm_is_open(void);
+
 #endif /* CONFIRM_H */

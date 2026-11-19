@@ -495,6 +495,11 @@ void power_set_charging_allowed(bool allowed) {
 static bool g_auto_off_enabled;
 static uint32_t g_auto_off_ms;
 
+// The scheduled shutdown (power.h): its deadline on CLOCK_BOOTTIME.
+static bool g_sched_off_armed;
+static uint32_t g_sched_off_at;
+static void (*g_sched_off_hook)(void);
+
 // ---------------------------------------------------------------------------
 // Why a naive suspend-to-RAM does not work here
 //
@@ -512,6 +517,34 @@ static uint32_t g_auto_off_ms;
 // suspend sequence further down tears the audio context all the way down before
 // writing `mem`.
 // ---------------------------------------------------------------------------
+
+void power_scheduled_off_start(uint32_t minutes) {
+	if (minutes == 0) {
+		minutes = 1;
+	}
+	g_sched_off_at = boottime_ms() + minutes * 60u * 1000u;
+	g_sched_off_armed = true;
+	printf("power: scheduled shutdown in %u min\n", (unsigned)minutes);
+}
+
+void power_scheduled_off_cancel(void) {
+	if (g_sched_off_armed) {
+		printf("power: scheduled shutdown called off\n");
+	}
+	g_sched_off_armed = false;
+}
+
+bool power_scheduled_off_armed(void) { return g_sched_off_armed; }
+
+uint32_t power_scheduled_off_left_ms(void) {
+	if (!g_sched_off_armed) {
+		return 0;
+	}
+	int32_t left = (int32_t)(g_sched_off_at - boottime_ms());
+	return left > 0 ? (uint32_t)left : 0;
+}
+
+void power_set_scheduled_off_hook(void (*cb)(void)) { g_sched_off_hook = cb; }
 
 void power_set_auto_off(bool enabled, uint32_t minutes) {
 	g_auto_off_enabled = enabled;
@@ -999,6 +1032,7 @@ static bool g_rtc_alarm_armed;
 // alarm programmed is the battery's.
 static bool g_rtc_auto_off_armed;
 static bool g_rtc_battery_armed;
+static bool g_rtc_sched_armed; // the scheduled shutdown's deadline is in this sleep
 // The automatic shutdown's deadline on CLOCK_BOOTTIME. The wall clock is not
 // usable for this: it does not count the sleep, and clock_resync() -- the one
 // thing that would fix it -- refuses to do anything until the date has been set
@@ -1029,6 +1063,7 @@ static void rtc_alarm_disarm(void) {
 	g_rtc_alarm_armed = false;
 	g_rtc_auto_off_armed = false;
 	g_rtc_battery_armed = false;
+	g_rtc_sched_armed = false;
 	rtc_wakealarm_write("0");
 	printf("power: RTC wake alarm disarmed\n");
 }
@@ -1048,6 +1083,15 @@ static void rtc_alarm_arm(void) {
 	g_rtc_alarm_armed = false;
 	g_rtc_auto_off_armed = false;
 	g_rtc_battery_armed = false;
+	g_rtc_sched_armed = false;
+
+	// The scheduled shutdown is a shutdown, like the automatic one: whichever
+	// of the two comes first is the one the alarm is for.
+	long sched_s = 0;
+	if (g_sched_off_armed) {
+		uint32_t left = power_scheduled_off_left_ms();
+		sched_s = left > 0 ? (long)(left / 1000u) + 1 : 1;
+	}
 
 	long auto_off_s = 0;
 	if (g_auto_off_enabled && g_auto_off_ms > 0) {
@@ -1056,6 +1100,10 @@ static void rtc_alarm_arm(void) {
 		if (idle_wall < g_auto_off_ms) {
 			auto_off_s = (long)((g_auto_off_ms - idle_wall) / 1000u) + 5; // margin
 		}
+	}
+	if (sched_s > 0 && (auto_off_s == 0 || sched_s < auto_off_s)) {
+		auto_off_s = sched_s;
+		g_rtc_sched_armed = true;
 	}
 	long battery_s = battery_check_after_s();
 
@@ -1066,6 +1114,7 @@ static void rtc_alarm_arm(void) {
 	// Cleared first also because the kernel rejects a new alarm over a pending
 	// one.
 	if (!rtc_wakealarm_write("0") || (auto_off_s == 0 && battery_s == 0)) {
+		g_rtc_sched_armed = false;
 		return;
 	}
 	bool battery_first = battery_s > 0 && (auto_off_s == 0 || battery_s < auto_off_s);
@@ -1075,6 +1124,7 @@ static void rtc_alarm_arm(void) {
 	time_t at = time(NULL) + remaining_s;
 	snprintf(buf, sizeof(buf), "%lld", (long long)at);
 	if (!rtc_wakealarm_write(buf)) {
+		g_rtc_sched_armed = false;
 		return;
 	}
 	g_rtc_alarm_armed = true;
@@ -1083,7 +1133,9 @@ static void rtc_alarm_arm(void) {
 	g_rtc_alarm_boot_at = boottime_ms() + (uint32_t)auto_off_s * 1000u;
 	g_rtc_battery_boot_at = boottime_ms() + (uint32_t)battery_s * 1000u;
 	printf("power: mem: RTC wake in %ld s %s\n", remaining_s,
-		   battery_first ? "to look at the battery" : "for the automatic shutdown");
+		   battery_first		 ? "to look at the battery"
+		   : g_rtc_sched_armed ? "for the scheduled shutdown"
+							   : "for the automatic shutdown");
 }
 
 void power_quiet_audio_for_shutdown(void) {
@@ -1326,8 +1378,15 @@ static void suspend_to_ram(void) {
 	pthread_mutex_unlock(&g_lock);
 
 	bool rtc_woke_it = rc == 0 && g_rtc_alarm_armed && !user_woke_it;
+	// The scheduled shutdown is not switched off from here: the next tick finds
+	// its time up and the interface lights the screen and counts down, so it
+	// can be called off like any other time.
 	if (rtc_woke_it && g_rtc_auto_off_armed && (int32_t)(boottime_ms() - g_rtc_alarm_boot_at) >= 0) {
-		power_auto_off_now("RTC wake after mem: the idle time has run out");
+		if (g_rtc_sched_armed) {
+			printf("power: mem: RTC wake for the scheduled shutdown\n");
+		} else {
+			power_auto_off_now("RTC wake after mem: the idle time has run out");
+		}
 	}
 	// The battery's own wake: a few seconds of slack, as the RTC counts whole
 	// seconds and the wake takes a moment.
@@ -2081,6 +2140,20 @@ static void power_timer_cb(lv_timer_t *timer) {
 		char why[64];
 		snprintf(why, sizeof(why), "%u minutes idle", g_auto_off_ms / 60000u);
 		power_auto_off_now(why);
+	}
+
+	// 4a-bis-1. the scheduled shutdown. The interface lights the screen if it
+	//           is dark and counts down, so it can still be called off -- the
+	//           stock firmware asks too. Also the way a sleep ends when the RTC
+	//           woke it for this: the wake leaves it to this tick.
+	if (g_sched_off_armed && (int32_t)(boottime_ms() - g_sched_off_at) >= 0) {
+		g_sched_off_armed = false;
+		if (g_sched_off_hook) {
+			printf("power: scheduled shutdown: time is up, counting down\n");
+			g_sched_off_hook();
+		} else {
+			power_auto_off_now("the scheduled shutdown");
+		}
 	}
 
 	// 4a-bis-2. the radios, a minute after the screen goes dark

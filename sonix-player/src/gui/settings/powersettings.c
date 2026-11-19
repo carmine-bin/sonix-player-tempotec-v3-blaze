@@ -7,6 +7,7 @@
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/settings/batteryusage.h"
 #include "src/gui/shell/settingsrow.h"
+#include "src/gui/shell/scheduledoff.h"
 #include "src/gui/shell/theme.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
@@ -435,6 +436,36 @@ static void standby_toggled_cb(lv_event_t *e) {
 	refresh_labels();
 }
 
+// --- the scheduled shutdown (scheduledoff.h) ---
+//
+// The switch arms it from now and the wheels are its length, the same pair the
+// music's sleep timer uses. The control centre arms and cancels it from
+// outside, and it disarms itself when the time comes, so the switch is read
+// again every time the page comes up.
+static settingsrow_duration_t sched_row;
+
+static void sched_refresh(void) {
+	settingsrow_duration_expanded(&sched_row, scheduledoff_armed());
+	settingsrow_duration_repaint(&sched_row);
+}
+
+static void sched_toggle_cb(lv_event_t *e) {
+	(void)e;
+	scheduledoff_set(lv_obj_has_state(sched_row.toggle, LV_STATE_CHECKED));
+	sched_refresh();
+}
+
+static void sched_wheel_cb(lv_event_t *e) {
+	(void)e;
+	scheduledoff_set_minutes(settingsrow_duration_minutes(&sched_row));
+}
+
+static void power_loaded_cb(lv_event_t *e) {
+	(void)e;
+	settingsrow_duration_set_minutes(&sched_row, scheduledoff_minutes());
+	sched_refresh();
+}
+
 void powersettings_init(gui_config_t *cfg) {
 	lv_obj_t *container = settingsrow_page(powersettings_screen, cfg, "power");
 
@@ -505,6 +536,19 @@ void powersettings_init(gui_config_t *cfg) {
 											  &auto_off_switch, &auto_off_value, &auto_off_slider,
 											  auto_off_toggled_cb, auto_off_changed_cb);
 	lv_slider_set_value(auto_off_slider, auto_off_index(), LV_ANIM_OFF);
+
+	// The scheduled shutdown, beside the automatic one it is easily taken for:
+	// that one waits for the player to be idle, this one does not.
+	settingsrow_toggle_duration(container, "power_scheduled_off", sched_toggle_cb, sched_wheel_cb, &sched_row);
+	settingsrow_duration_set_minutes(&sched_row, scheduledoff_minutes());
+	sched_refresh();
+	lv_obj_t *sched_note = lv_label_create(container);
+	lv_label_set_long_mode(sched_note, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(sched_note, lv_pct(100));
+	lv_obj_add_style(sched_note, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(sched_note, &font_ui_22, 0);
+	lv_label_set_text(sched_note, tr("power_scheduled_off_note"));
+	lv_obj_add_event_cb(powersettings_screen, power_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
 
 	settingsrow_slider(container, "power_idle_link", IDLE_LINK_COUNT, &idle_link_value, &idle_link_slider,
 					   idle_link_changed_cb);

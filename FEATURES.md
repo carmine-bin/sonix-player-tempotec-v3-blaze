@@ -56,6 +56,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **ReplayGain** - off, by track or by album, read from the tags.
 - **Remember track** - the queue and the position are still there after a restart. You can also open Now Playing straight away at startup.
 - **Sleep timer** - set a time and the playback pauses by itself when it runs out. There is one for music, one for audiobooks and one for podcasts.
+- **Scheduled power-off** - the player switches itself off a chosen time from now, playing or not, like the stock firmware's sleep shutdown. A tap on its control centre button starts it, and the button shows the minutes left; when the time is up the screen lights and counts down ten seconds, with a button to cancel. It also wakes the player from standby to do it.
 
 ## Now Playing
 
@@ -168,7 +169,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 ## Control centre and status bar
 
-- Pull down from the status bar (or tap it) to open the **Control centre**: what is playing, brightness, and buttons for Wi-Fi, Bluetooth, AirPlay, DLNA, SonixLink, Wi-Fi transfer, EQ, PEQ, MSEB, Fade, Gapless, Gain, Line out, Volume lock, Direct mode and the three sleep timers.
+- Pull down from the status bar (or tap it) to open the **Control centre**: what is playing, brightness, and buttons for Wi-Fi, Bluetooth, AirPlay, DLNA, SonixLink, Wi-Fi transfer, EQ, PEQ, MSEB, Fade, Gapless, Gain, Line out, Volume lock, Direct mode, the three sleep timers and Scheduled power-off.
 - Choose which buttons are shown and in what order.
 - The status bar shows the clock and the battery, and can stay on in Now Playing too.
 

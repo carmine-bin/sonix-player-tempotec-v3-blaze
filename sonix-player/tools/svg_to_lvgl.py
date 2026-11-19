@@ -230,6 +230,8 @@ ICONS = [
     ("volume-lock.svg", "volume_lock_quick", 46),
     # Direct: straight through, nothing on the way.
     ("direct-quick.svg", "direct_quick", 46),
+    # The scheduled shutdown: the power glyph with a stopwatch's crown.
+    ("scheduled-off-quick.svg", "scheduled_off_quick", 46),
     # File types, in the file manager and on the web page: one glyph per
     # family, at the size of the folder beside them.
     ("files-music.svg", "files_music", 32),

@@ -243,6 +243,21 @@ void power_set_charging_allowed(bool allowed);
 // Powers the device off after `minutes` with no input and nothing playing.
 void power_set_auto_off(bool enabled, uint32_t minutes);
 
+// The scheduled shutdown ("Apagado programado", the stock firmware's sleep
+// shutdown): the player switches off `minutes` from now, whether music is
+// playing or not. Counted on CLOCK_BOOTTIME and carried across a suspend by
+// the RTC alarm, so a device asleep when the time comes still goes off. Not
+// kept across a restart: a timer is for tonight.
+//
+// When the time comes the hook runs (the interface's countdown with a way to
+// call it off, see scheduledoff.h), with the screen dark too: it lights it.
+// With no hook it shuts down at once.
+void power_scheduled_off_start(uint32_t minutes);
+void power_scheduled_off_cancel(void);
+bool power_scheduled_off_armed(void);
+uint32_t power_scheduled_off_left_ms(void); // 0 when not armed
+void power_set_scheduled_off_hook(void (*cb)(void));
+
 // Closes DAC mode, the Bluetooth receiver or Wi-Fi Transfer after `minutes`
 // with no sound or transfer through it and no input; 0 never does.
 void power_set_idle_link(uint32_t minutes);

@@ -40,6 +40,8 @@
 #include "src/system/audio/eq.h"
 #include "src/system/playback/playlist.h"
 #include "src/system/playback/sleeptimer.h"
+#include "src/gui/shell/scheduledoff.h"
+#include "src/gui/settings/powersettings.h"
 #include "src/system/device/power.h"
 #include "src/system/streaming/qobuzcache.h"
 #include "src/system/streaming/qobuzsync.h"
@@ -100,6 +102,8 @@ static lv_obj_t *wifi_transfer_btn;
 static lv_obj_t *gapless_btn;
 static lv_obj_t *volume_lock_btn;
 static lv_obj_t *direct_btn;
+static lv_obj_t *scheduled_off_btn;
+static lv_obj_t *scheduled_off_label; // the minutes left, over the button while it counts
 
 // ---------------------------------------------------------------------------
 // Which buttons the panel carries, and where
@@ -136,6 +140,7 @@ static const char *const button_key[QP_BTN_COUNT] = {
 	[QP_BTN_GAPLESS] = "gapless",
 	[QP_BTN_VOLUME_LOCK] = "volume_lock",
 	[QP_BTN_DIRECT] = "direct",
+	[QP_BTN_SCHEDULED_OFF] = "scheduled_off",
 };
 
 static const char *const button_tag[QP_BTN_COUNT] = {
@@ -157,6 +162,7 @@ static const char *const button_tag[QP_BTN_COUNT] = {
 	[QP_BTN_GAPLESS] = "musicsettings_gapless_playback",
 	[QP_BTN_VOLUME_LOCK] = "quickpanel_volume_lock",
 	[QP_BTN_DIRECT] = "musicsettings_direct",
+	[QP_BTN_SCHEDULED_OFF] = "power_scheduled_off",
 };
 
 static uint8_t slots[QP_SLOT_COUNT];  // the grid, QP_BTN_NONE where it is empty
@@ -1187,6 +1193,8 @@ static lv_obj_t *button_widget(quickpanel_button_t which) {
 		return volume_lock_btn;
 	case QP_BTN_DIRECT:
 		return direct_btn;
+	case QP_BTN_SCHEDULED_OFF:
+		return scheduled_off_btn;
 	default:
 		return NULL;
 	}
@@ -1405,6 +1413,8 @@ const lv_image_dsc_t *quickpanel_button_icon(quickpanel_button_t button) {
 		return &icon_volume_lock_quick;
 	case QP_BTN_DIRECT:
 		return &icon_direct_quick;
+	case QP_BTN_SCHEDULED_OFF:
+		return &icon_scheduled_off_quick;
 	default:
 		return &icon_wifi;
 	}
@@ -1492,6 +1502,22 @@ static void refresh_audio_buttons(void) {
 	circle_button_set_on(sleep_audiobook_btn, sleep_timer_armed(SLEEPTIMER_AUDIOBOOK));
 	circle_button_set_on(sleep_podcast_btn, sleep_timer_armed(SLEEPTIMER_PODCAST));
 	circle_button_set_on(wifi_transfer_btn, wifitransfer_get_enabled());
+
+	// The scheduled shutdown shows what is left rather than its glyph while it
+	// counts, as the stock panel does; the poll repaints it while the panel is
+	// open.
+	if (scheduled_off_btn) {
+		bool armed = scheduledoff_armed();
+		circle_button_set_on(scheduled_off_btn, armed);
+		lv_obj_t *icon = lv_obj_get_child(scheduled_off_btn, 0);
+		lv_obj_set_hidden(icon, armed);
+		lv_obj_set_hidden(scheduled_off_label, !armed);
+		if (armed) {
+			char left[16];
+			scheduledoff_left_text(left, sizeof(left));
+			lv_label_set_text(scheduled_off_label, left);
+		}
+	}
 
 	// Two or three gains: the icon names the level (L, M, H) and the circle is
 	// lit for anything above the lowest.
@@ -1879,6 +1905,25 @@ static void volume_lock_clicked_cb(lv_event_t *e) {
 	toggled();
 }
 
+// The scheduled shutdown: a tap arms it from now for the length last chosen,
+// or calls it off. The toast says which, with the minutes.
+static void scheduled_off_clicked_cb(lv_event_t *e) {
+	(void)e;
+	if (long_press_consumed) {
+		long_press_consumed = false;
+		return;
+	}
+	scheduledoff_set(!scheduledoff_armed());
+	toggled();
+}
+
+// Read when held, not when the panel is built: the power page is built after
+// the panel (gui.c), so its screen does not exist yet at that point.
+static void scheduled_off_page_cb(lv_event_t *e) {
+	(void)e;
+	open_page(powersettings_screen);
+}
+
 // Direct (eq.h): a tap flips it, a hold opens the music page, where its switch
 // sits above the effects it bypasses. The effects' own buttons stay as they
 // are: they show what comes back.
@@ -2128,6 +2173,17 @@ void quickpanel_init(gui_config_t *cfg) {
 	direct_btn = make_circle_button(row, &icon_direct_quick);
 	lv_obj_add_event_cb(direct_btn, direct_clicked_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_add_event_cb(direct_btn, open_page_cb, LV_EVENT_LONG_PRESSED, musicsettings_screen);
+
+	// A tap arms it for the length last chosen, or calls it off; a hold opens
+	// the power page, where the length is chosen.
+	scheduled_off_btn = make_circle_button(row, &icon_scheduled_off_quick);
+	scheduled_off_label = lv_label_create(scheduled_off_btn);
+	lv_obj_set_style_text_font(scheduled_off_label, &font_ui_20_bold, 0);
+	lv_obj_set_style_text_color(scheduled_off_label, lv_color_white(), 0);
+	lv_obj_center(scheduled_off_label);
+	lv_obj_set_hidden(scheduled_off_label, true);
+	lv_obj_add_event_cb(scheduled_off_btn, scheduled_off_clicked_cb, LV_EVENT_CLICKED, NULL);
+	lv_obj_add_event_cb(scheduled_off_btn, scheduled_off_page_cb, LV_EVENT_LONG_PRESSED, NULL);
 
 	bright_row = lv_obj_create(controls_card);
 	lv_obj_set_size(bright_row, lv_pct(100), BRIGHT_ROW_H);

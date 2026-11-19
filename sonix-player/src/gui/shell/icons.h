@@ -126,6 +126,7 @@ extern const lv_image_dsc_t icon_gapless_on_quick;
 extern const lv_image_dsc_t icon_gapless_off_quick;
 extern const lv_image_dsc_t icon_volume_lock_quick;
 extern const lv_image_dsc_t icon_direct_quick;
+extern const lv_image_dsc_t icon_scheduled_off_quick;
 extern const lv_image_dsc_t icon_files_music;
 extern const lv_image_dsc_t icon_files_audiobook;
 extern const lv_image_dsc_t icon_files_playlist;

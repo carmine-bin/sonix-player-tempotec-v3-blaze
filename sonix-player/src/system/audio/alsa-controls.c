@@ -466,6 +466,10 @@ int detect_output(void) {
 	return 2; // Default to 3.5mm device
 }
 
+bool alsa_jack_plugged(void) {
+	return file_matches("/sys/class/switch/headset/state", "1") || file_matches("/sys/class/switch/balance/state", "1");
+}
+
 // See alsa-controls.h. Two sockets: {1, 2} single-ended and {3} balanced.
 int output_reinit_partner(int route) { return route == 3 ? 2 : 3; }
 

@@ -13,6 +13,10 @@ void alsa_list_controls(char *out, size_t out_size);
 
 int detect_output(void); // the "Output Port Switch" value for what is plugged in now
 
+// True while a plug is in one of the analogue sockets (3.5 mm or 4.4 mm):
+// headphones, or a cable to an amplifier. Read from the jack switches.
+bool alsa_jack_plugged(void);
+
 // True on the R1's audio board: one CS43131, a 3.5 mm socket and the USB-C
 // port. No HBC3000, no 4.4 mm socket, no DRE or NOS, and the digital filter
 // goes to the chip by another way. See alsa-controls.c.

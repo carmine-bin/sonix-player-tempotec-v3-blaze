@@ -71,6 +71,12 @@ void audio_start_output_reinit_after_resume(void);
 // before mem cuts the amplifier's power (R3 Pro II; see audio.c).
 void audio_park_output_before_suspend(void);
 
+// True while the Blaze's amplifier is still on after the music stopped and
+// its idle wait (headphones in: five minutes) is not over yet. The standby
+// waits for it: mem would take the amplifier down early, and with it the pop
+// the wait is there to keep out of the listener's ears.
+bool audio_amp_park_pending(void);
+
 // The analogue output brought down before a power-off or reboot: on the Blaze
 // the machine driver's own off sequence (route 5), elsewhere the mem park.
 void audio_quiet_output_for_power_off(void);

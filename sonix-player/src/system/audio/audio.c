@@ -473,10 +473,33 @@ static volatile bool pcm_device_open = false;
 // players.
 #define PAUSED_DEVICE_CLOSE_MS 5000
 
-// The Blaze's amplifier off once a pause has lasted this long (see
-// idle_amp_off()); the stock player's CloseDelay for its analogue output.
-#define IDLE_AMP_OFF_MS 30000
+// How long the Blaze's amplifier stays on once the music has stopped (see
+// idle_amp_off()).
+//
+// Going off pops: the driver's own off sequence (route 5), on the stock
+// firmware too. Measured on the device (2026-11-19, IEMs, a microphone) it is
+// the amplifier's mute pin switching, and no order of the pins was found that
+// makes it quiet -- with the DAC playing, stopped, configured or not, the mute
+// ramped or not. So the only choice left is when it comes, and it should come
+// when nobody is listening.
+//
+// Headphones in and the music on the internal DAC: five minutes, the pause of
+// someone who is coming back. It was the stock player's thirty seconds, and a
+// pause under a minute with the headphones on got the pop in the ears.
+//
+// Nothing plugged in, or the music going to Bluetooth or a USB DAC: off as
+// soon as the device is handed back. Nobody is on the socket to hear it, and
+// the amplifier has nothing to do.
+//
+// [audio] amp_off_plugged_seconds and amp_off_unplugged_seconds.
+#define AMP_OFF_PLUGGED_S 300
+#define AMP_OFF_UNPLUGGED_S 0
 static bool idle_amp_off(long paused_ms);
+static long idle_amp_off_ms(void);
+
+// When idle_amp_off() last found the amplifier on with its wait not over: a
+// park is coming. See audio_amp_park_pending().
+static volatile long amp_wait_seen_ms;
 
 // True when the stream is going out over Bluetooth rather than to the DAC.
 static bool output_is_bluetooth(void) {
@@ -4522,7 +4545,7 @@ static void *playback_thread_func(void *arg) {
 	while (1) {
 		pthread_mutex_lock(&audio_mutex);
 		// Stopped from here (album over, or stopped): the Blaze's amplifier
-		// goes off after IDLE_AMP_OFF_MS, as it does when paused.
+		// goes off after idle_amp_off_ms(), as it does when paused.
 		long idle_since = log_ms();
 		bool idle_park_done = !alsa_board_is_ak4493();
 		while (!play_request && !stop_thread) {
@@ -4537,13 +4560,13 @@ static void *playback_thread_func(void *arg) {
 				continue;
 			}
 			if (!gapless_holding()) {
-				long left = IDLE_AMP_OFF_MS - (log_ms() - idle_since);
+				long left = idle_amp_off_ms() - (log_ms() - idle_since);
 				if (!idle_park_done && left <= 0) {
 					idle_park_done = true; // once: a refused park must not spin
 					pthread_mutex_unlock(&audio_mutex);
 					bool external_held = !idle_amp_off(log_ms() - idle_since);
 					pthread_mutex_lock(&audio_mutex);
-					// A receiver has the card: park IDLE_AMP_OFF_MS after it
+					// A receiver has the card: park idle_amp_off_ms() after it
 					// lets go instead (audio_external_end rings the doorbell).
 					while (external_held && external_pcm && !play_request && !stop_thread) {
 						pthread_cond_wait(&audio_cond, &audio_mutex);
@@ -4557,6 +4580,16 @@ static void *playback_thread_func(void *arg) {
 				if (idle_park_done) {
 					pthread_cond_wait(&audio_cond, &audio_mutex);
 					continue;
+				}
+				// Looked at again every second rather than once at the end:
+				// the wait depends on the socket, and headphones pulled out
+				// four minutes in should not keep the amplifier on for one
+				// more. It is also the mark the standby reads.
+				if (alsa_controls_output() != 5) {
+					amp_wait_seen_ms = log_ms();
+				}
+				if (left > 1000) {
+					left = 1000;
 				}
 				// In whole seconds plus the rest: `long` is 32 bits on the
 				// device, and 30 000 ms in nanoseconds is not, which made this
@@ -5128,15 +5161,37 @@ void audio_get_output_device(char *out, size_t out_size) {
 static int external_frame_bytes = 4;
 static pthread_mutex_t external_lock = PTHREAD_MUTEX_INITIALIZER;
 
+// The wait before the amplifier goes off, for what is plugged in right now
+// (see AMP_OFF_PLUGGED_S).
+static long idle_amp_off_ms(void) {
+	char device[sizeof(output_pcm)];
+	audio_get_output_device(device, sizeof(device));
+	bool listened = strcmp(device, AUDIO_DEFAULT_PCM) == 0 && alsa_jack_plugged();
+	long seconds = listened ? config_get_int("audio", "amp_off_plugged_seconds", AMP_OFF_PLUGGED_S)
+							: config_get_int("audio", "amp_off_unplugged_seconds", AMP_OFF_UNPLUGGED_S);
+	return seconds > 0 ? seconds * 1000 : 0;
+}
+
+bool audio_amp_park_pending(void) {
+	long seen = amp_wait_seen_ms;
+	// Three seconds: the waits mark it every second. Older is a wait that
+	// ended some other way (a play, a park), and must not hold the standby.
+	return alsa_board_is_ak4493() && seen && log_ms() - seen < 3000 && alsa_controls_output() != 5;
+}
+
 // The stock player's output device drops to route 5 thirty seconds after its
 // last write, so its soft pop comes then and mem later finds the amplifier
-// already off. The same here, from the paused loops with the PCM closed: the
-// next play's auto_set_output() writes the real route from 5. Not while a
-// receiver or DAC-mode stream holds the card: a route write under a live
-// stream stalls its DMA.
+// already off. The same here, from the paused and stopped loops with the PCM
+// closed, after idle_amp_off_ms(): the next play's auto_set_output() writes
+// the real route from 5. Not while a receiver or DAC-mode stream holds the
+// card: a route write under a live stream stalls its DMA.
 // False only when an external stream held the card and the park was skipped.
 static bool idle_amp_off(long paused_ms) {
-	if (!alsa_board_is_ak4493() || paused_ms < IDLE_AMP_OFF_MS || alsa_controls_output() == 5) {
+	if (!alsa_board_is_ak4493() || alsa_controls_output() == 5) {
+		return true;
+	}
+	if (paused_ms < idle_amp_off_ms()) {
+		amp_wait_seen_ms = log_ms();
 		return true;
 	}
 	// Held through the write: an external stream opening in between would

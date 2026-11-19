@@ -1377,6 +1377,14 @@ static void suspend_if_idle(uint32_t now, bool playing) {
 		mem_skip("music is playing");
 		return;
 	}
+	// Headphones in, the Blaze's amplifier still on, and its wait after the
+	// music stopped not over: mem would take it down now, with the pop the
+	// wait is there to keep away from someone still wearing them. The park
+	// comes at the end of the wait and the standby right after it.
+	if (audio_amp_park_pending()) {
+		mem_skip("the amplifier is waiting to go off (headphones in)");
+		return;
+	}
 	// Pause counts as a stopped state: the PCM is already released after five
 	// seconds ("DAC powered down" in the log) and resuming always reopens the
 	// device from scratch, route included, which is the path every unpause

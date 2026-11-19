@@ -145,16 +145,6 @@ static void bt_log_toggled_cb(lv_event_t *e) {
 	update_bt_log_row();
 }
 
-// One screen page (main.c, fb_single_page): read at start-up, so the change
-// takes the next one.
-static lv_obj_t *single_page_switch;
-
-static void single_page_toggled_cb(lv_event_t *e) {
-	(void)e;
-	config_set_bool("screen", "single_page", lv_obj_has_state(single_page_switch, LV_STATE_CHECKED));
-	config_save();
-}
-
 static void db_log_toggled_cb(lv_event_t *e) {
 	(void)e;
 	library_set_log_database(lv_obj_has_state(db_log_switch, LV_STATE_CHECKED));
@@ -202,12 +192,6 @@ void devoptions_init(gui_config_t *cfg) {
 	bt_log_name_label = lv_obj_get_child(bt_card, 0);
 	bt_log_path_label = add_path_label(bt_card);
 	add_note(container, "devoptions_bluetooth_log_note");
-
-	settingsrow_toggle(container, "devoptions_single_page", &single_page_switch, single_page_toggled_cb);
-	if (config_get_bool("screen", "single_page", false)) {
-		lv_obj_add_state(single_page_switch, LV_STATE_CHECKED);
-	}
-	add_note(container, "devoptions_single_page_note");
 
 	// Opens the page showing RAM and running processes. A navigation row with a
 	// chevron, like the developer options entry on the previous page.
